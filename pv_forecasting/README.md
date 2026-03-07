@@ -13,6 +13,10 @@ python -m pv_forecasting.preprocess
 
 # 2. 训练（结果写入 pv_forecasting/model_output/run_YYYYMMDD-HHMMSS/）
 python -m pv_forecasting.train
+
+# 3. 测试数据推理（需 PV 覆盖测试时段）
+python -m pv_forecasting.preprocess_test --cam-dir data/cam_test [--pv-csv data/power/xxx.csv] --pack
+python -m pv_forecasting.infer --test-pack-dir derived/test/packed [run_dir]
 ```
 
 ## 数据与路径

@@ -1,6 +1,6 @@
 """
-双分支 PV 预测模型：Sky CNN+GRU + PV Encoder+GRU → concat → MLP → 5 个 horizon。
-输入: sky (B,60,3,H,W), pv_past (B,4,1); 输出: (B,5)。
+双分支 PV 预测模型：Sky CNN+GRU + PV Encoder+GRU → concat → MLP → 4 个 horizon。
+输入: sky (B,60,3,H,W), pv_past (B,4,1); 输出: (B,4)，对应 [t+15,t+30,t+45,t+60]。
 """
 import torch
 import torch.nn as nn
@@ -65,9 +65,9 @@ class PVBranch(nn.Module):
 
 
 class PVForecastModel(nn.Module):
-    """Sky 分支 128 + PV 分支 64 → concat 192 → MLP → 5。"""
+    """Sky 分支 128 + PV 分支 64 → concat 192 → MLP → 4 (horizon)。"""
 
-    def __init__(self, sky_embed=128, pv_hidden=64, fusion_hidden=128, out_dim=5, dropout=0.2):
+    def __init__(self, sky_embed=128, pv_hidden=64, fusion_hidden=128, out_dim=4, dropout=0.2):
         super().__init__()
         self.sky_branch = SkyBranch(in_ch=3, embed_dim=sky_embed, hidden=sky_embed)
         self.pv_branch = PVBranch(hidden=pv_hidden, pv_proj=32)

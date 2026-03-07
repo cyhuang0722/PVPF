@@ -33,7 +33,7 @@ def load_image(path: str, size=(128, 128)) -> np.ndarray:
 
 
 class ForecastDataset(Dataset):
-    """每样本: 60 张图 (60,3,H,W)，过去 PV (4,1)，目标 (5,)。可选 sky_mask 乘到每帧。"""
+    """每样本: 60 张图 (60,3,H,W)，过去 PV (4,1)，目标 (4,) [t+15..t+60]。可选 sky_mask 乘到每帧。"""
 
     def __init__(
         self,

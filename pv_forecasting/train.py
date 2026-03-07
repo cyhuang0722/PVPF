@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, Subset
 
 from .model import PVForecastModel
 from .dataset import ForecastDataset, PackedForecastDataset
+from .preprocess import HORIZON
 
 
 # ---------- config ----------
@@ -68,11 +69,11 @@ def train_epoch(model, loader, criterion, optimizer, device, peak_w):
     total_loss = 0.0
     for batch in loader:
         sky = batch["sky"].to(device)
-        pv_past = batch["pv_past"].to(device) / peak_w
-        targets = batch["targets"].to(device) / peak_w
+        pv_past_norm = batch["pv_past"].to(device) / peak_w
+        targets_norm = batch["targets"].to(device) / peak_w
         optimizer.zero_grad()
-        out = model(sky, pv_past)
-        loss = criterion(out, targets)
+        out = model(sky, pv_past_norm)
+        loss = criterion(out, targets_norm)
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
@@ -85,10 +86,10 @@ def evaluate(model, loader, criterion, device, peak_w):
     with torch.no_grad():
         for batch in loader:
             sky = batch["sky"].to(device)
-            pv_past = batch["pv_past"].to(device) / peak_w
-            targets = batch["targets"].to(device) / peak_w
-            out = model(sky, pv_past)
-            total_loss += criterion(out, targets).item()
+            pv_past_norm = batch["pv_past"].to(device) / peak_w
+            targets_norm = batch["targets"].to(device) / peak_w
+            out = model(sky, pv_past_norm)
+            total_loss += criterion(out, targets_norm).item()
     return total_loss / len(loader)
 
 
@@ -162,18 +163,17 @@ def main():
     model.eval()
 
     def run_predict(ds, base_dataset) -> Tuple[np.ndarray, np.ndarray, pd.Series]:
-        """Run prediction on ds (Subset or full), return pred_w, true_w, ts_pred."""
-        preds, targets = [], []
+        """Run prediction on ds (Subset or full). Return pred_w, true_w (both in W), ts_pred."""
+        preds_norm, targets_raw = [], []
         with torch.no_grad():
             for batch in DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False):
-                pv_past = batch["pv_past"].to(device) / peak
-                out = model(batch["sky"].to(device), pv_past)
-                preds.append(out.cpu().numpy())
-                targets.append(batch["targets"].numpy())
-        pred_norm = np.concatenate(preds, axis=0)
-        true_norm = np.concatenate(targets, axis=0)
+                pv_past_norm = batch["pv_past"].to(device) / peak
+                out = model(batch["sky"].to(device), pv_past_norm)
+                preds_norm.append(out.cpu().numpy())
+                targets_raw.append(batch["targets"].numpy())
+        pred_norm = np.concatenate(preds_norm, axis=0)
+        true_w = np.concatenate(targets_raw, axis=0)
         pred_w = pred_norm * peak
-        true_w = true_norm * peak
         if isinstance(ds, Subset):
             ts = base_dataset.ts_pred_series.iloc[list(ds.indices)]
         else:
@@ -185,32 +185,32 @@ def main():
         mae_all = np.abs(err).mean()
         rmse_all = np.sqrt((err ** 2).mean())
         row = {"mae_W": float(mae_all), "rmse_W": float(rmse_all)}
-        for k in range(5):
+        for k in range(HORIZON):
             row[f"mae_W_h{k}"] = float(np.abs(err[:, k]).mean())
             row[f"rmse_W_h{k}"] = float(np.sqrt((err[:, k] ** 2).mean()))
         return row
 
     # 1) 全量预测（保留，供后续分析）
     pred_all_w, true_all_w, ts_all = run_predict(dataset, dataset)
-    pred_df_all = pd.DataFrame({f"pv_pred_W_{k}": pred_all_w[:, k] for k in range(5)})
+    pred_df_all = pd.DataFrame({f"pv_pred_W_{k}": pred_all_w[:, k] for k in range(HORIZON)})
     pred_df_all["ts_pred"] = ts_all
-    for k in range(5):
+    for k in range(HORIZON):
         pred_df_all[f"pv_true_W_{k}"] = true_all_w[:, k]
     pred_df_all.to_csv(run_dir / "predictions_all.csv", index=False)
 
     # 2) 验证集预测与指标（真正用于评估泛化）
     pred_val_w, true_val_w, ts_val = run_predict(val_ds, dataset)
-    pred_df_val = pd.DataFrame({f"pv_pred_W_{k}": pred_val_w[:, k] for k in range(5)})
+    pred_df_val = pd.DataFrame({f"pv_pred_W_{k}": pred_val_w[:, k] for k in range(HORIZON)})
     pred_df_val["ts_pred"] = ts_val
-    for k in range(5):
+    for k in range(HORIZON):
         pred_df_val[f"pv_true_W_{k}"] = true_val_w[:, k]
     pred_df_val.to_csv(run_dir / "predictions_val.csv", index=False)
 
     metrics_val = compute_metrics(pred_val_w, true_val_w)
     pd.DataFrame([metrics_val]).to_csv(run_dir / "metrics_val.csv", index=False)
     logging.info(f"Val metrics: MAE_W={metrics_val['mae_W']:.2f}, RMSE_W={metrics_val['rmse_W']:.2f}")
-    for k in range(5):
-        logging.info(f"  horizon {k} (t+{k*15}min): MAE_W={metrics_val[f'mae_W_h{k}']:.2f}, RMSE_W={metrics_val[f'rmse_W_h{k}']:.2f}")
+    for k in range(HORIZON):
+        logging.info(f"  horizon {k} (t+{(k+1)*15}min): MAE_W={metrics_val[f'mae_W_h{k}']:.2f}, RMSE_W={metrics_val[f'rmse_W_h{k}']:.2f}")
 
     # 3) 全量指标（仅作参考，勿与 val 混淆）
     metrics_all = compute_metrics(pred_all_w, true_all_w)
