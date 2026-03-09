@@ -25,6 +25,7 @@ CSV_PATH = DERIVED_DIR / "forecast_windows.csv"
 PACK_DIR = DERIVED_DIR / "packed_forecast"
 TEST_PACK_DIR = DERIVED_DIR / "test" / "packed"
 TEST_CSV_PATH = DERIVED_DIR / "test" / "test_forecast_windows.csv"
+TEST_PREDICTIONS_PATH = DERIVED_DIR / "test" 
 SKY_MASK_PATH = BASE_DIR / "sky_mask.png"
 IMG_SIZE = (128, 128)
 PEAK_POWER_W = 66.3 * 1000.0
@@ -42,7 +43,7 @@ def find_latest_run() -> Path:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", nargs="?", help="e.g. pv_forecasting/model_output/run_xxx")
-    parser.add_argument("--test-pack-dir", help="测试数据 packed 目录，如 derived/test/packed")
+    parser.add_argument("--test-pack-dir", help="测试数据 packed 目录，如 derived/test/packed/")
     parser.add_argument("--test-csv", help="测试数据 CSV（未打包时用）")
     parser.add_argument("--out", help="测试预测输出路径，默认 run_dir/predictions_test.csv")
     args = parser.parse_args()
@@ -89,6 +90,13 @@ def main():
     else:
         raise FileNotFoundError(f"Need {PACK_DIR}, {CSV_PATH}, or --test-pack-dir/--test-csv")
 
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logging.info(f"Device: GPU ({torch.cuda.get_device_name(0)})")
+    else:
+        device = torch.device("cpu")
+        logging.info("Device: CPU (no GPU detected)")
+
     model = PVForecastModel().to(device)
     model.load_state_dict(torch.load(best_path, map_location=device))
     model.eval()
@@ -112,13 +120,33 @@ def main():
         return pred_w, true_w, pd.to_datetime(ts)
 
     if is_test:
-        pred_w, _, ts = run_predict(dataset, dataset, has_targets=True)
+        pred_w, true_w, ts = run_predict(dataset, dataset, has_targets=True)
         out_path = Path(args.out) if args.out else (run_dir / "predictions_test.csv")
         out_path = out_path if out_path.is_absolute() else (run_dir / out_path)
         pred_df = pd.DataFrame({f"pv_pred_W_{k}": pred_w[:, k] for k in range(HORIZON)})
         pred_df["ts_pred"] = ts
+        if true_w is not None:
+            for k in range(HORIZON):
+                pred_df[f"pv_true_W_{k}"] = true_w[:, k]
         pred_df.to_csv(out_path, index=False)
         print(f"Test predictions saved: {out_path} ({len(pred_df)} samples)")
+
+        if true_w is not None:
+            def compute_metrics(pred_w, true_w):
+                err = pred_w - true_w
+                row = {"mae_W": float(np.abs(err).mean()), "rmse_W": float(np.sqrt((err ** 2).mean()))}
+                for k in range(HORIZON):
+                    row[f"mae_W_h{k}"] = float(np.abs(err[:, k]).mean())
+                    row[f"rmse_W_h{k}"] = float(np.sqrt((err[:, k] ** 2).mean()))
+                return row
+
+            metrics_test = compute_metrics(pred_w, true_w)
+            metrics_path = out_path.parent / "metrics_test.csv"
+            pd.DataFrame([metrics_test]).to_csv(metrics_path, index=False)
+            print(f"Test metrics saved: {metrics_path}")
+            print(f"  Test MAE_W={metrics_test['mae_W']:.2f}, RMSE_W={metrics_test['rmse_W']:.2f}")
+            for k in range(HORIZON):
+                print(f"    h{k} MAE_W={metrics_test[f'mae_W_h{k}']:.2f}, RMSE_W={metrics_test[f'rmse_W_h{k}']:.2f}")
         return
 
     n_val = max(1, int(len(dataset) * VAL_RATIO))

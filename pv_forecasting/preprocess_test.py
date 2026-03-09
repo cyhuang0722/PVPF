@@ -71,7 +71,7 @@ def main():
     print(f"  saved: {out_csv}")
 
     if args.pack:
-        pack_dir = out_dir / "packed_forecast"
+        pack_dir = out_dir / "packed"
         print("[4] Pack to .npz...")
         pack_forecast_to_npz(
             csv_path=out_csv,
