@@ -251,7 +251,9 @@ def main():
     pd.DataFrame([metrics_val]).to_csv(run_dir / "metrics_val.csv", index=False)
     logging.info(f"Val metrics: MAE_W={metrics_val['mae_W']:.2f}, RMSE_W={metrics_val['rmse_W']:.2f}")
     for k in range(HORIZON):
-        logging.info(f"  horizon {k} (t+{(k+1)*15}min): MAE_W={metrics_val[f'mae_W_h{k}']:.2f}, RMSE_W={metrics_val[f'rmse_W_h{k}']:.2f}")
+        logging.info(
+            f"  horizon h{k}: MAE_W={metrics_val[f'mae_W_h{k}']:.2f}, RMSE_W={metrics_val[f'rmse_W_h{k}']:.2f}"
+        )
 
     # 3) 全量指标（仅作参考，勿与 val 混淆）
     metrics_all = compute_metrics(pred_all_w, true_all_w)

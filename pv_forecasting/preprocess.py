@@ -38,6 +38,21 @@ HORIZON = 4        # 4 个预测时刻 [t+15, t+30, t+45, t+60]
 IMG_MATCH_TOLERANCE_SEC = 45
 
 
+def parse_future_offsets(text: str) -> list[int]:
+    """
+    解析 --future-offsets-min，例如 "15,30,45,60"。
+    返回严格递增的正整数分钟列表。
+    """
+    vals = [int(x.strip()) for x in text.split(",") if x.strip()]
+    if not vals:
+        raise ValueError("future offsets is empty")
+    if any(v <= 0 for v in vals):
+        raise ValueError(f"future offsets must be positive, got {vals}")
+    if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):
+        raise ValueError(f"future offsets must be strictly increasing, got {vals}")
+    return vals
+
+
 def build_image_index_raw(cam_dir: Path, tz: str) -> pd.DataFrame:
     """与 build_image_index 相同，但保留原始时间戳（不 round），用于容差匹配。"""
     rows = []
@@ -106,11 +121,13 @@ def build_forecast_windows(
     img_stride_min: int = IMG_STRIDE_MIN,
     past_pv_len: int = PAST_PV_LEN,
     horizon: int = HORIZON,
+    future_offsets_min: Optional[list[int]] = None,
     tz: str = "Asia/Singapore",
     tolerance_sec: float = IMG_MATCH_TOLERANCE_SEC,
 ) -> pd.DataFrame:
     """
-    对每个有足够历史的 15min 时刻 t，构建：img_len 张图路径、4 个过去 PV [t-45,t-30,t-15,t]、4 个目标 [t+15..t+60]。
+    对每个有足够历史的 15min 时刻 t，构建：img_len 张图路径、4 个过去 PV [t-45,t-30,t-15,t]、多个目标。
+    future_offsets_min 为空时，按 horizon 退化为 [15,30,...,15*horizon]。
     使用容差匹配：对每个目标分钟找最近图像，若 |Δ| ≤ tolerance_sec 则接受，避免 round 导致秒级偏移误删。
     """
     if df_img.empty or df_pv.empty:
@@ -121,8 +138,12 @@ def build_forecast_windows(
         raise ValueError(f"img_stride_min must be positive, got {img_stride_min}")
     if past_pv_len != 4:
         raise ValueError(f"Current implementation expects past_pv_len=4, got {past_pv_len}")
-    if horizon != 4:
-        raise ValueError(f"Current implementation expects horizon=4, got {horizon}")
+    if future_offsets_min is None:
+        future_offsets_min = [15 * (i + 1) for i in range(horizon)]
+    if len(future_offsets_min) != horizon:
+        raise ValueError(
+            f"horizon ({horizon}) must equal len(future_offsets_min) ({len(future_offsets_min)})"
+        )
 
     df_img = df_img.copy()
     df_img["ts_img"] = df_img["ts_img"].dt.tz_convert(tz)
@@ -158,7 +179,7 @@ def build_forecast_windows(
         t = t.round("min")
 
         required_past = [t - pd.Timedelta(minutes=m) for m in (45, 30, 15, 0)]   # [t-45, t-30, t-15, t]
-        required_future = [t + pd.Timedelta(minutes=m) for m in (15, 30, 45, 60)]  # [t+15, t+30, t+45, t+60]
+        required_future = [t + pd.Timedelta(minutes=m) for m in future_offsets_min]
         required_all = required_past + required_future
         if not all(ts in pv_index_set for ts in required_all):
             filtered_missing_pv += 1
@@ -332,6 +353,12 @@ def main():
     parser.add_argument("--img-stride-min", type=int, default=IMG_STRIDE_MIN, help="图像时间采样步长（分钟）")
     parser.add_argument("--past-pv-len", type=int, default=PAST_PV_LEN, help="过去 PV 点数，当前实现固定为 4")
     parser.add_argument("--horizon", type=int, default=HORIZON, help="预测步数，当前实现固定为 4")
+    parser.add_argument(
+        "--future-offsets-min",
+        type=str,
+        default="15,30,45,60",
+        help="目标相对 t 的分钟偏移，逗号分隔，如 30,60,120,240",
+    )
     parser.add_argument("--img-height", type=int, default=IMG_HEIGHT, help="打包图像高度")
     parser.add_argument("--img-width", type=int, default=IMG_WIDTH, help="打包图像宽度")
     parser.add_argument("--pack-batch-size", type=int, default=PACK_BATCH_SIZE, help="预打包分片 batch 大小")
@@ -342,6 +369,11 @@ def main():
     pv_csv = base / args.pv_csv
     out_dir = Path(__file__).resolve().parent / args.out_dir
     tz = getattr(BASE_CFG, "TZ", "Asia/Singapore") if BASE_CFG else "Asia/Singapore"
+    future_offsets_min = parse_future_offsets(args.future_offsets_min)
+    if args.horizon != len(future_offsets_min):
+        raise ValueError(
+            f"--horizon ({args.horizon}) must match number of --future-offsets-min ({len(future_offsets_min)})"
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -363,7 +395,7 @@ def main():
     print(
         "[3] Build forecast windows "
         f"({args.img_len} img, stride={args.img_stride_min}min + "
-        f"{args.past_pv_len} past PV + {args.horizon} targets)..."
+        f"{args.past_pv_len} past PV + {args.horizon} targets @ {future_offsets_min}min)..."
     )
     df = build_forecast_windows(
         df_img,
@@ -372,6 +404,7 @@ def main():
         img_stride_min=args.img_stride_min,
         past_pv_len=args.past_pv_len,
         horizon=args.horizon,
+        future_offsets_min=future_offsets_min,
         tz=tz,
     )
     print(f"  samples: {len(df)}")

@@ -14,6 +14,13 @@ python -m pv_forecasting.preprocess
 # ablation 例子：30 张图、每 2 分钟采样一次，输出到新目录
 python -m pv_forecasting.preprocess --img-len 30 --img-stride-min 2 --out-dir derived_ablation/30x2 --pack
 
+# decoupled horizon 分层预测
+python -m pv_forecasting.preprocess \
+  --horizon 4 \
+  --future-offsets-min 30,60,120,240 \
+  --out-dir derived_ablation/h30_60_120_240 \
+  --pack
+
 # 2. 训练（结果写入 pv_forecasting/model_output/run_YYYYMMDD-HHMMSS/）
 python -m pv_forecasting.train
 
@@ -23,6 +30,13 @@ python -m pv_forecasting.train --pack-dir derived_ablation/30x2/packed_forecast 
 # 3. 测试数据推理（需 PV 覆盖测试时段）
 python -m pv_forecasting.preprocess_test --cam-dir data/cam_test [--pv-csv data/power/xxx.csv] --pack
 python -m pv_forecasting.infer --test-pack-dir derived/test/packed [run_dir]
+
+# 分层预测
+python -m pv_forecasting.preprocess_test \
+  --horizon 4 \
+  --future-offsets-min 30,60,120,240 \
+  --out-dir derived/test_h30_60_120_240 \
+  --pack
 ```
 
 ## 数据与路径

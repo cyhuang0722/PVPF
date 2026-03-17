@@ -21,6 +21,7 @@ from .preprocess import (
     load_pv_15min,
     pack_forecast_to_npz,
     print_time_coverage_debug,
+    parse_future_offsets,
 )
 
 
@@ -30,11 +31,17 @@ def main():
     parser.add_argument("--pv-csv", default="data/power/power-LSK_N-test.csv", help="PV 15min 数据（需覆盖测试时段）")
     parser.add_argument("--pack", action="store_true", help="打包为 .npz（否则只生成 CSV）")
     parser.add_argument("--out-dir", default=None, help="输出目录，默认 derived/test")
-    parser.add_argument("--pack-dir", default=None, help="打包输出目录，默认 <out-dir>/packed")
+    parser.add_argument("--pack-dir", default=None, help="打包输出目录，默认 <out-dir>/packed_test")
     parser.add_argument("--img-len", type=int, default=IMG_LEN, help="每个样本使用多少张图")
     parser.add_argument("--img-stride-min", type=int, default=1, help="图像时间采样步长（分钟）")
     parser.add_argument("--past-pv-len", type=int, default=PAST_PV_LEN, help="过去 PV 点数，当前实现固定为 4")
     parser.add_argument("--horizon", type=int, default=HORIZON, help="预测步数，当前实现固定为 4")
+    parser.add_argument(
+        "--future-offsets-min",
+        type=str,
+        default="15,30,45,60",
+        help="目标相对 t 的分钟偏移，逗号分隔，如 30,60,120,240",
+    )
     parser.add_argument("--img-height", type=int, default=IMG_HEIGHT, help="打包图像高度")
     parser.add_argument("--img-width", type=int, default=IMG_WIDTH, help="打包图像宽度")
     parser.add_argument("--pack-batch-size", type=int, default=PACK_BATCH_SIZE, help="预打包分片 batch 大小")
@@ -45,6 +52,11 @@ def main():
     pv_csv = base / args.pv_csv
     out_dir = Path(__file__).resolve().parent / (args.out_dir or "derived/test")
     tz = getattr(BASE_CFG, "TZ", "Asia/Singapore") if BASE_CFG else "Asia/Singapore"
+    future_offsets_min = parse_future_offsets(args.future_offsets_min)
+    if args.horizon != len(future_offsets_min):
+        raise ValueError(
+            f"--horizon ({args.horizon}) must match number of --future-offsets-min ({len(future_offsets_min)})"
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -65,7 +77,7 @@ def main():
     print(
         "[3] Build forecast windows "
         f"({args.img_len} img, stride={args.img_stride_min}min + "
-        f"{args.past_pv_len} past PV + {args.horizon} targets)..."
+        f"{args.past_pv_len} past PV + {args.horizon} targets @ {future_offsets_min}min)..."
     )
     df = build_forecast_windows(
         df_img,
@@ -74,6 +86,7 @@ def main():
         img_stride_min=args.img_stride_min,
         past_pv_len=args.past_pv_len,
         horizon=args.horizon,
+        future_offsets_min=future_offsets_min,
         tz=tz,
     )
     if df.empty:
@@ -91,7 +104,7 @@ def main():
     print(f"  saved: {out_csv}")
 
     if args.pack:
-        pack_dir = (Path(__file__).resolve().parent / args.pack_dir) if args.pack_dir else (out_dir / "packed")
+        pack_dir = (Path(__file__).resolve().parent / args.pack_dir) if args.pack_dir else (out_dir / "packed_test")
         print("[4] Pack to .npz...")
         pack_forecast_to_npz(
             csv_path=out_csv,
