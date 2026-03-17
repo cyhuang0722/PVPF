@@ -30,6 +30,14 @@ def main():
     parser.add_argument("--pv-csv", default="data/power/power-LSK_N-test.csv", help="PV 15min 数据（需覆盖测试时段）")
     parser.add_argument("--pack", action="store_true", help="打包为 .npz（否则只生成 CSV）")
     parser.add_argument("--out-dir", default=None, help="输出目录，默认 derived/test")
+    parser.add_argument("--pack-dir", default=None, help="打包输出目录，默认 <out-dir>/packed")
+    parser.add_argument("--img-len", type=int, default=IMG_LEN, help="每个样本使用多少张图")
+    parser.add_argument("--img-stride-min", type=int, default=1, help="图像时间采样步长（分钟）")
+    parser.add_argument("--past-pv-len", type=int, default=PAST_PV_LEN, help="过去 PV 点数，当前实现固定为 4")
+    parser.add_argument("--horizon", type=int, default=HORIZON, help="预测步数，当前实现固定为 4")
+    parser.add_argument("--img-height", type=int, default=IMG_HEIGHT, help="打包图像高度")
+    parser.add_argument("--img-width", type=int, default=IMG_WIDTH, help="打包图像宽度")
+    parser.add_argument("--pack-batch-size", type=int, default=PACK_BATCH_SIZE, help="预打包分片 batch 大小")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parent.parent
@@ -49,13 +57,25 @@ def main():
     print(f"[2] Load PV from {pv_csv}...")
     df_pv = load_pv_15min(pv_csv, tz)
     df_pv = df_pv.dropna(subset=["power"]).reset_index(drop=True)
-    if len(df_pv) < PAST_PV_LEN + HORIZON:
-        raise RuntimeError(f"Not enough PV points (need at least {PAST_PV_LEN + HORIZON} for past + horizon)")
+    if len(df_pv) < args.past_pv_len + args.horizon:
+        raise RuntimeError(f"Not enough PV points (need at least {args.past_pv_len + args.horizon} for past + horizon)")
     print(f"  pv rows: {len(df_pv)}")
     print_time_coverage_debug(df_img, df_pv, tz)
 
-    print("[3] Build forecast windows (60 img + 4 past PV + 4 targets)...")
-    df = build_forecast_windows(df_img, df_pv, IMG_LEN, PAST_PV_LEN, HORIZON, tz)
+    print(
+        "[3] Build forecast windows "
+        f"({args.img_len} img, stride={args.img_stride_min}min + "
+        f"{args.past_pv_len} past PV + {args.horizon} targets)..."
+    )
+    df = build_forecast_windows(
+        df_img,
+        df_pv,
+        img_len=args.img_len,
+        img_stride_min=args.img_stride_min,
+        past_pv_len=args.past_pv_len,
+        horizon=args.horizon,
+        tz=tz,
+    )
     if df.empty:
         img_range = f"{df_img['ts_img'].min()} ~ {df_img['ts_img'].max()}" if not df_img.empty else "?"
         pv_range = f"{df_pv['ts_power'].min()} ~ {df_pv['ts_power'].max()}" if not df_pv.empty else "?"
@@ -71,13 +91,13 @@ def main():
     print(f"  saved: {out_csv}")
 
     if args.pack:
-        pack_dir = out_dir / "packed"
+        pack_dir = (Path(__file__).resolve().parent / args.pack_dir) if args.pack_dir else (out_dir / "packed")
         print("[4] Pack to .npz...")
         pack_forecast_to_npz(
             csv_path=out_csv,
             out_dir=pack_dir,
-            img_size=(IMG_HEIGHT, IMG_WIDTH),
-            batch_size=PACK_BATCH_SIZE,
+            img_size=(args.img_height, args.img_width),
+            batch_size=args.pack_batch_size,
             mask_path=SKY_MASK_PATH if SKY_MASK_PATH.exists() else None,
             base_dir=base,
         )

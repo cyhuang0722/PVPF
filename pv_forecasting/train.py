@@ -1,6 +1,7 @@
 """
 训练 Sky+PV 双分支预测模型，结果保存到 model_output/run_YYYYMMDD-HHMMSS。
 """
+import argparse
 import json
 import logging
 import sys
@@ -34,11 +35,16 @@ EPOCHS = 100
 LR = 1e-3
 VAL_RATIO = 0.2
 RANDOM_SEED = 42
+SKY_EMBED = 128
+PV_HIDDEN = 64
+FUSION_HIDDEN = 128
+DROPOUT = 0.2
 
 
-def make_run_dir() -> Path:
+def make_run_dir(run_name: str | None = None) -> Path:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = MODEL_OUTPUT_DIR / f"run_{ts}"
+    suffix = f"_{run_name}" if run_name else ""
+    run_dir = MODEL_OUTPUT_DIR / f"run_{ts}{suffix}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -94,63 +100,98 @@ def evaluate(model, loader, criterion, device, peak_w):
 
 
 def main():
-    run_dir = make_run_dir()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--csv", default=str(CSV_PATH), help="训练 CSV 路径")
+    parser.add_argument("--pack-dir", default=str(PACK_DIR), help="训练 packed 数据目录")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="训练 batch size")
+    parser.add_argument("--epochs", type=int, default=EPOCHS, help="训练轮数")
+    parser.add_argument("--lr", type=float, default=LR, help="学习率")
+    parser.add_argument("--val-ratio", type=float, default=VAL_RATIO, help="验证集比例")
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED, help="随机种子")
+    parser.add_argument("--sky-embed", type=int, default=SKY_EMBED, help="Sky 分支嵌入维度")
+    parser.add_argument("--pv-hidden", type=int, default=PV_HIDDEN, help="PV 分支 hidden 维度")
+    parser.add_argument("--fusion-hidden", type=int, default=FUSION_HIDDEN, help="融合层 hidden 维度")
+    parser.add_argument("--dropout", type=float, default=DROPOUT, help="融合层 dropout")
+    parser.add_argument("--run-name", default=None, help="run 目录后缀，便于区分 ablation")
+    args = parser.parse_args()
+
+    csv_path = Path(args.csv)
+    if not csv_path.is_absolute():
+        csv_path = BASE_DIR.parent / csv_path if str(csv_path).startswith("pv_forecasting") else BASE_DIR / csv_path
+    pack_dir = Path(args.pack_dir)
+    if not pack_dir.is_absolute():
+        pack_dir = BASE_DIR.parent / pack_dir if str(pack_dir).startswith("pv_forecasting") else BASE_DIR / pack_dir
+
+    run_dir = make_run_dir(args.run_name)
     setup_logging(run_dir)
     dump_metadata(run_dir, {
-        "CSV_PATH": str(CSV_PATH),
-        "PACK_DIR": str(PACK_DIR),
+        "CSV_PATH": str(csv_path),
+        "PACK_DIR": str(pack_dir),
         "SKY_MASK_PATH": str(SKY_MASK_PATH),
         "IMG_SIZE": IMG_SIZE,
         "PEAK_POWER_W": PEAK_POWER_W,
-        "BATCH_SIZE": BATCH_SIZE,
-        "EPOCHS": EPOCHS,
-        "LR": LR,
-        "VAL_RATIO": VAL_RATIO,
-        "RANDOM_SEED": RANDOM_SEED,
+        "BATCH_SIZE": args.batch_size,
+        "EPOCHS": args.epochs,
+        "LR": args.lr,
+        "VAL_RATIO": args.val_ratio,
+        "RANDOM_SEED": args.seed,
+        "MODEL_CFG": {
+            "sky_embed": args.sky_embed,
+            "pv_hidden": args.pv_hidden,
+            "fusion_hidden": args.fusion_hidden,
+            "dropout": args.dropout,
+            "out_dim": HORIZON,
+        },
     })
 
-    if PACK_DIR.exists() and list(PACK_DIR.glob("batch_*.npz")):
-        logging.info(f"Using packed data: {PACK_DIR}")
-        dataset = PackedForecastDataset(PACK_DIR)
-    elif CSV_PATH.exists():
-        logging.info(f"Using CSV data: {CSV_PATH}")
+    if pack_dir.exists() and list(pack_dir.glob("batch_*.npz")):
+        logging.info(f"Using packed data: {pack_dir}")
+        dataset = PackedForecastDataset(pack_dir)
+    elif csv_path.exists():
+        logging.info(f"Using CSV data: {csv_path}")
         mask_path = SKY_MASK_PATH if SKY_MASK_PATH.exists() else None
         if mask_path:
             logging.info(f"[sky_mask] Loaded {SKY_MASK_PATH} -> applied to sky images")
         dataset = ForecastDataset(
-            CSV_PATH, img_size=IMG_SIZE, base_dir=BASE_DIR.parent, sky_mask_path=mask_path
+            csv_path, img_size=IMG_SIZE, base_dir=BASE_DIR.parent, sky_mask_path=mask_path
         )
     else:
-        raise FileNotFoundError(f"Run preprocess first. Need {PACK_DIR} or {CSV_PATH}")
+        raise FileNotFoundError(f"Run preprocess first. Need {pack_dir} or {csv_path}")
 
-    torch.manual_seed(RANDOM_SEED)
+    torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         device = torch.device("cuda")
         logging.info(f"Device: GPU ({torch.cuda.get_device_name(0)})")
     else:
         device = torch.device("cpu")
         logging.info("Device: CPU (no GPU detected)")
-    n_val = max(1, int(len(dataset) * VAL_RATIO))
+    n_val = max(1, int(len(dataset) * args.val_ratio))
     n_train = len(dataset) - n_val
     train_ds = Subset(dataset, range(n_train))
     val_ds = Subset(dataset, range(n_train, len(dataset)))
     logging.info(f"Split: train={n_train} (chronological first), val={n_val} (chronological last)")
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=(device.type == "cuda"))
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=(device.type == "cuda"))
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-    model = PVForecastModel().to(device)
+    model = PVForecastModel(
+        sky_embed=args.sky_embed,
+        pv_hidden=args.pv_hidden,
+        fusion_hidden=args.fusion_hidden,
+        out_dim=HORIZON,
+        dropout=args.dropout,
+    ).to(device)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     best_val = float("inf")
     history = []
 
     peak = PEAK_POWER_W
-    for epoch in range(EPOCHS):
+    for epoch in range(args.epochs):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device, peak)
         val_loss = evaluate(model, val_loader, criterion, device, peak)
         history.append({"epoch": epoch + 1, "loss": train_loss, "val_loss": val_loss})
-        logging.info(f"Epoch {epoch+1}/{EPOCHS} loss={train_loss:.6f} val_loss={val_loss:.6f}")
+        logging.info(f"Epoch {epoch+1}/{args.epochs} loss={train_loss:.6f} val_loss={val_loss:.6f}")
 
         if val_loss < best_val:
             best_val = val_loss
@@ -166,7 +207,7 @@ def main():
         """Run prediction on ds (Subset or full). Return pred_w, true_w (both in W), ts_pred."""
         preds_norm, targets_raw = [], []
         with torch.no_grad():
-            for batch in DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False):
+            for batch in DataLoader(ds, batch_size=args.batch_size, shuffle=False):
                 pv_past_norm = batch["pv_past"].to(device) / peak
                 out = model(batch["sky"].to(device), pv_past_norm)
                 preds_norm.append(out.cpu().numpy())

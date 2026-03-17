@@ -8,11 +8,17 @@
 # 在 PVPF 项目根目录下
 cd PVPF
 
-# 1. 数据预处理（生成 derived/forecast_windows.csv），可选参数--pack
+# 1. 数据预处理（默认生成 derived/forecast_windows.csv），可选参数 --pack
 python -m pv_forecasting.preprocess
+
+# ablation 例子：30 张图、每 2 分钟采样一次，输出到新目录
+python -m pv_forecasting.preprocess --img-len 30 --img-stride-min 2 --out-dir derived_ablation/30x2 --pack
 
 # 2. 训练（结果写入 pv_forecasting/model_output/run_YYYYMMDD-HHMMSS/）
 python -m pv_forecasting.train
+
+# ablation 训练例子：指定数据目录和 run 名称
+python -m pv_forecasting.train --pack-dir derived_ablation/30x2/packed_forecast --run-name 30x2
 
 # 3. 测试数据推理（需 PV 覆盖测试时段）
 python -m pv_forecasting.preprocess_test --cam-dir data/cam_test [--pv-csv data/power/xxx.csv] --pack
@@ -23,6 +29,7 @@ python -m pv_forecasting.infer --test-pack-dir derived/test/packed [run_dir]
 
 - 预处理默认：`data/cam_dir`（天空图）、`data/power/power-LSK_N.csv`（15min PV）。
 - 输出：`pv_forecasting/derived/forecast_windows.csv`；训练输出：`model_output/run_*/`（history.csv, metrics.csv, predictions_all.csv, best_model.pt, run_metadata.json）。
+- ablation 常用参数：`--img-len`、`--img-stride-min`、`--out-dir`、`--pack-dir`、`--run-name`。
 
 ## 模型结构
 

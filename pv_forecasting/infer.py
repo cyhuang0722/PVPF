@@ -5,6 +5,7 @@
   测试数据:      python -m pv_forecasting.infer --test-pack-dir derived/test/packed [run_dir]
 """
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -40,12 +41,21 @@ def find_latest_run() -> Path:
     return runs[0]
 
 
+def load_model_cfg(run_dir: Path) -> dict:
+    meta_path = run_dir / "run_metadata.json"
+    if not meta_path.exists():
+        return {}
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    return meta.get("cfg", {}).get("MODEL_CFG", {})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", nargs="?", help="e.g. pv_forecasting/model_output/run_xxx")
     parser.add_argument("--test-pack-dir", help="测试数据 packed 目录，如 derived/test/packed/")
     parser.add_argument("--test-csv", help="测试数据 CSV（未打包时用）")
     parser.add_argument("--out", help="测试预测输出路径，默认 run_dir/predictions_test.csv")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="推理 batch size")
     args = parser.parse_args()
 
     if args.run_dir:
@@ -97,14 +107,21 @@ def main():
         device = torch.device("cpu")
         logging.info("Device: CPU (no GPU detected)")
 
-    model = PVForecastModel().to(device)
+    model_cfg = load_model_cfg(run_dir)
+    model = PVForecastModel(
+        sky_embed=model_cfg.get("sky_embed", 128),
+        pv_hidden=model_cfg.get("pv_hidden", 64),
+        fusion_hidden=model_cfg.get("fusion_hidden", 128),
+        out_dim=model_cfg.get("out_dim", HORIZON),
+        dropout=model_cfg.get("dropout", 0.2),
+    ).to(device)
     model.load_state_dict(torch.load(best_path, map_location=device))
     model.eval()
 
     def run_predict(ds, base_dataset, has_targets=True):
         preds_norm, targets_raw = [], []
         with torch.no_grad():
-            for batch in DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False):
+            for batch in DataLoader(ds, batch_size=args.batch_size, shuffle=False):
                 pv_past_norm = batch["pv_past"].to(device) / peak
                 out = model(batch["sky"].to(device), pv_past_norm)
                 preds_norm.append(out.cpu().numpy())
