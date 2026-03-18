@@ -4,101 +4,98 @@ import torch
 import torch.nn as nn
 
 
-class SatelliteEncoder(nn.Module):
-    def __init__(self, in_channels: int = 3, hidden_channels: tuple[int, int, int] = (32, 64, 128)) -> None:
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
         super().__init__()
-        layers = []
-        prev = in_channels
-        last_idx = len(hidden_channels) - 1
-        for idx, out in enumerate(hidden_channels):
-            stride = 1 if idx == last_idx else 2
-            layers.extend(
-                [
-                    nn.Conv2d(prev, out, kernel_size=3, stride=1, padding=1),
-                    nn.BatchNorm2d(out),
-                    nn.ReLU(inplace=True),
-                    nn.Conv2d(out, out, kernel_size=3, stride=stride, padding=1),
-                    nn.BatchNorm2d(out),
-                    nn.ReLU(inplace=True),
-                ]
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.act = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        if stride != 1 or in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
             )
-            prev = out
-        self.net = nn.Sequential(*layers)
-        self.out_channels = hidden_channels[-1]
+        else:
+            self.skip = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        residual = self.skip(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = x + residual
+        return self.act(x)
 
 
-class ConvLSTMCell(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, kernel_size: int = 3) -> None:
+class SpatialEncoder(nn.Module):
+    def __init__(self, in_channels: int, base_channels: int = 32, stage_multipliers: tuple[int, ...] = (1, 2, 4, 8)) -> None:
         super().__init__()
-        padding = kernel_size // 2
-        self.hidden_dim = hidden_dim
-        self.conv = nn.Conv2d(
-            input_dim + hidden_dim,
-            4 * hidden_dim,
-            kernel_size=kernel_size,
-            padding=padding,
+        stem_channels = base_channels
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, stem_channels, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(stem_channels),
+            nn.ReLU(inplace=True),
         )
 
-    def forward(self, x: torch.Tensor, state: tuple[torch.Tensor, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        h_prev, c_prev = state
-        gates = self.conv(torch.cat([x, h_prev], dim=1))
-        i, f, o, g = torch.chunk(gates, 4, dim=1)
-        i = torch.sigmoid(i)
-        f = torch.sigmoid(f)
-        o = torch.sigmoid(o)
-        g = torch.tanh(g)
-        c = f * c_prev + i * g
-        h = o * torch.tanh(c)
-        return h, c
+        stages = []
+        prev = stem_channels
+        for idx, mult in enumerate(stage_multipliers):
+            out = base_channels * mult
+            stride = 1 if idx == 0 else 2
+            stages.append(
+                nn.Sequential(
+                    ResidualBlock(prev, out, stride=stride),
+                    ResidualBlock(out, out, stride=1),
+                )
+            )
+            prev = out
+        self.stages = nn.ModuleList(stages)
+        self.out_channels = prev
 
-    def init_state(
-        self,
-        batch_size: int,
-        spatial_size: tuple[int, int],
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        height, width = spatial_size
-        h = torch.zeros(batch_size, self.hidden_dim, height, width, device=device, dtype=dtype)
-        c = torch.zeros(batch_size, self.hidden_dim, height, width, device=device, dtype=dtype)
-        return h, c
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        feats = []
+        x = self.stem(x)
+        for stage in self.stages:
+            x = stage(x)
+            feats.append(x)
+        return feats
 
 
-class TemporalModel(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int = 128,
-        num_layers: int = 1,
-        kernel_size: int = 3,
-    ) -> None:
+class TemporalFusion(nn.Module):
+    def __init__(self, channels: int, hidden_channels: int, dropout: float) -> None:
         super().__init__()
-        cells = []
-        for layer_idx in range(num_layers):
-            in_dim = input_dim if layer_idx == 0 else hidden_dim
-            cells.append(ConvLSTMCell(in_dim, hidden_dim, kernel_size=kernel_size))
-        self.cells = nn.ModuleList(cells)
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
+        self.temporal = nn.Sequential(
+            nn.Conv3d(channels, hidden_channels, kernel_size=(3, 3, 3), padding=(1, 1, 1), bias=False),
+            nn.BatchNorm3d(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout3d(dropout),
+            nn.Conv3d(hidden_channels, hidden_channels, kernel_size=(3, 3, 3), padding=(1, 1, 1), bias=False),
+            nn.BatchNorm3d(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.temporal_pool = nn.AdaptiveAvgPool3d((1, 1, 1))
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, 1, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, steps, _, height, width = x.shape
-        layer_input = x
-        for cell in self.cells:
-            h, c = cell.init_state(batch_size, (height, width), x.device, x.dtype)
-            outputs = []
-            for t in range(steps):
-                h, c = cell(layer_input[:, t], (h, c))
-                outputs.append(h)
-            layer_input = torch.stack(outputs, dim=1)
-        return layer_input[:, -1]
+        x = self.temporal(x)
+        context = self.temporal_pool(x).flatten(1)
+        spatial = x[:, :, -1]
+        gate = self.spatial_gate(spatial)
+        gated_spatial = (spatial * gate).mean(dim=(-2, -1))
+        return torch.cat([context, gated_spatial], dim=1)
 
 
 class ForecastHead(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 128, out_dim: int = 4, dropout: float = 0.2) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int, out_dim: int, dropout: float) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -106,6 +103,7 @@ class ForecastHead(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, out_dim),
         )
 
@@ -114,28 +112,39 @@ class ForecastHead(nn.Module):
 
 
 class SatelliteOnlyForecaster(nn.Module):
+    """
+    Paper-oriented satellite branch:
+    shared spatial encoder per frame + explicit 3D spatio-temporal fusion.
+
+    The papers use the same image backbone family across modalities. Here we
+    reproduce that idea with a shared residual encoder over each frame and a
+    temporal fusion block that sees the full [T, H, W] volume.
+    """
+
     def __init__(
         self,
         in_channels: int = 3,
-        encoder_channels: tuple[int, int, int] = (32, 64, 128),
-        convlstm_hidden_dim: int = 128,
-        convlstm_layers: int = 1,
-        convlstm_kernel_size: int = 3,
-        head_hidden_dim: int = 128,
+        base_channels: int = 32,
+        stage_multipliers: tuple[int, ...] = (1, 2, 4, 8),
+        temporal_hidden_dim: int = 128,
+        head_hidden_dim: int = 256,
         dropout: float = 0.2,
         out_dim: int = 4,
         debug_shapes: bool = False,
     ) -> None:
         super().__init__()
-        self.encoder = SatelliteEncoder(in_channels=in_channels, hidden_channels=encoder_channels)
-        self.temporal_model = TemporalModel(
-            input_dim=self.encoder.out_channels,
-            hidden_dim=convlstm_hidden_dim,
-            num_layers=convlstm_layers,
-            kernel_size=convlstm_kernel_size,
+        self.encoder = SpatialEncoder(
+            in_channels=in_channels,
+            base_channels=base_channels,
+            stage_multipliers=stage_multipliers,
+        )
+        self.temporal_fusion = TemporalFusion(
+            channels=self.encoder.out_channels,
+            hidden_channels=temporal_hidden_dim,
+            dropout=dropout,
         )
         self.head = ForecastHead(
-            input_dim=convlstm_hidden_dim,
+            input_dim=temporal_hidden_dim * 2,
             hidden_dim=head_hidden_dim,
             out_dim=out_dim,
             dropout=dropout,
@@ -145,14 +154,13 @@ class SatelliteOnlyForecaster(nn.Module):
 
     def forward(self, satellite: torch.Tensor) -> torch.Tensor:
         bsz, steps, channels, height, width = satellite.shape
-        encoded_flat = self.encoder(satellite.reshape(bsz * steps, channels, height, width))
-        encoded = encoded_flat.reshape(bsz, steps, encoded_flat.shape[1], encoded_flat.shape[2], encoded_flat.shape[3])
-        context_map = self.temporal_model(encoded)
+        flat = satellite.reshape(bsz * steps, channels, height, width)
+        feats = self.encoder(flat)[-1]
+        feats = feats.reshape(bsz, steps, feats.shape[1], feats.shape[2], feats.shape[3]).permute(0, 2, 1, 3, 4)
+        fused = self.temporal_fusion(feats)
         if self.debug_shapes and not self._debug_shapes_printed:
             print(f"[debug] input satellite: {tuple(satellite.shape)}")
-            print(f"[debug] encoded per-frame: {tuple(encoded_flat.shape)}")
-            print(f"[debug] reshaped encoded: {tuple(encoded.shape)}")
-            print(f"[debug] context_map: {tuple(context_map.shape)}")
+            print(f"[debug] encoded map: {tuple(feats.shape)}")
+            print(f"[debug] fused feature: {tuple(fused.shape)}")
             self._debug_shapes_printed = True
-        pooled = context_map.mean(dim=(-2, -1))
-        return self.head(pooled)
+        return self.head(fused)

@@ -1,5 +1,5 @@
 {
-  "name": "satellite_only_baseline",
+  "name": "satellite_only_paper_backbone",
   "data": {
     "roi_dir": "data/satellite/roi",
     "pv_csv": "data/power/power-LSK_N.csv",
@@ -10,7 +10,7 @@
     "center_lat": 22.3364,
     "center_lon": 114.2633,
     "channels": [2, 3, 5],
-    "patch_size": 15,
+    "patch_size": 96,
     "t_in": 4,
     "sat_stride_min": 15,
     "future_offsets_min": [15, 30, 45, 60],
@@ -23,11 +23,10 @@
     "val_ratio": 0.15
   },
   "model": {
-    "encoder_channels": [32, 64, 128],
-    "convlstm_hidden_dim": 128,
-    "convlstm_layers": 1,
-    "convlstm_kernel_size": 3,
-    "head_hidden_dim": 128,
+    "base_channels": 32,
+    "stage_multipliers": [1, 2, 4, 8],
+    "temporal_hidden_dim": 128,
+    "head_hidden_dim": 256,
     "dropout": 0.2,
     "debug_shapes": true
   },

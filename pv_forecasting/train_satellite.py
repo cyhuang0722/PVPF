@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import sys
@@ -77,6 +78,55 @@ def evaluate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device:
     return total_loss / max(1, len(loader)), np.concatenate(preds, axis=0), np.concatenate(targets, axis=0)
 
 
+def resolve_model_kwargs(model_cfg: dict, out_dim: int) -> dict:
+    encoder_channels = tuple(model_cfg.get("encoder_channels", [32, 64, 128]))
+    base_channels = int(model_cfg.get("base_channels", encoder_channels[0]))
+    stage_multipliers = tuple(
+        model_cfg.get(
+            "stage_multipliers",
+            [max(1, int(ch // max(1, base_channels))) for ch in (*encoder_channels, encoder_channels[-1] * 2)],
+        )
+    )
+    return {
+        "base_channels": base_channels,
+        "stage_multipliers": stage_multipliers,
+        "temporal_hidden_dim": int(model_cfg.get("temporal_hidden_dim", model_cfg.get("convlstm_hidden_dim", 128))),
+        "head_hidden_dim": int(model_cfg.get("head_hidden_dim", 256)),
+        "dropout": float(model_cfg.get("dropout", 0.2)),
+        "out_dim": out_dim,
+        "debug_shapes": bool(model_cfg.get("debug_shapes", False)),
+    }
+
+
+def validate_preprocessed_artifacts(csv_path: Path, pack_dir: Path, data_cfg: dict) -> None:
+    expected_t = int(data_cfg["t_in"])
+    expected_c = len(data_cfg["channels"])
+    expected_patch = int(data_cfg["patch_size"])
+
+    if csv_path.exists():
+        meta = pd.read_csv(csv_path, nrows=1)
+        if not meta.empty:
+            row = meta.iloc[0]
+            sat_paths = ast.literal_eval(row["sat_paths"]) if isinstance(row["sat_paths"], str) else row["sat_paths"]
+            channels = ast.literal_eval(row["channels"]) if isinstance(row["channels"], str) else row["channels"]
+            patch_size = int(row["patch_size"])
+            if len(sat_paths) != expected_t or len(channels) != expected_c or patch_size != expected_patch:
+                raise ValueError(
+                    "forecast_windows.csv does not match the current config. "
+                    "Please rerun pv_forecasting/preprocess_satellite.py."
+                )
+
+    shards = sorted(pack_dir.glob("batch_*.npz"))
+    if shards:
+        with np.load(shards[0], allow_pickle=True) as data:
+            sat = data["satellite"]
+            if sat.ndim != 5 or sat.shape[1] != expected_t or sat.shape[2] != expected_c or sat.shape[3] != expected_patch or sat.shape[4] != expected_patch:
+                raise ValueError(
+                    "packed_satellite tensors do not match the current config. "
+                    "Please rerun pv_forecasting/preprocess_satellite.py --pack."
+                )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="JSON config path")
@@ -95,6 +145,7 @@ def main() -> None:
     pack_dir = PROJECT_ROOT / data_cfg["out_dir"] / "packed_satellite"
     csv_path = PROJECT_ROOT / data_cfg["out_dir"] / "forecast_windows.csv"
     stats_path = PROJECT_ROOT / data_cfg["out_dir"] / data_cfg.get("stats_filename", "satellite_stats.json")
+    validate_preprocessed_artifacts(csv_path=csv_path, pack_dir=pack_dir, data_cfg=data_cfg)
 
     if pack_dir.exists() and list(pack_dir.glob("batch_*.npz")):
         train_ds = PackedSatelliteDataset(pack_dir, split="train")
@@ -127,14 +178,7 @@ def main() -> None:
 
     model = SatelliteOnlyForecaster(
         in_channels=len(data_cfg["channels"]),
-        encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64, 128])),
-        convlstm_hidden_dim=int(model_cfg.get("convlstm_hidden_dim", 128)),
-        convlstm_layers=int(model_cfg.get("convlstm_layers", 1)),
-        convlstm_kernel_size=int(model_cfg.get("convlstm_kernel_size", 3)),
-        head_hidden_dim=int(model_cfg.get("head_hidden_dim", 128)),
-        dropout=float(model_cfg.get("dropout", 0.2)),
-        out_dim=len(data_cfg["future_offsets_min"]),
-        debug_shapes=bool(model_cfg.get("debug_shapes", False)),
+        **resolve_model_kwargs(model_cfg, out_dim=len(data_cfg["future_offsets_min"])),
     ).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_cfg["lr"]))
