@@ -62,19 +62,50 @@ def compute_metrics(pred_w: np.ndarray, true_w: np.ndarray, horizon_names: list[
     return out
 
 
-def evaluate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> tuple[float, np.ndarray, np.ndarray]:
+def forward_losses(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    power_criterion: nn.Module,
+    ci_criterion: nn.Module,
+    ci_weight: float,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    sat = batch["satellite"].to(device)
+    y = batch["targets"].to(device)
+    outputs = model(sat)
+    power_loss = power_criterion(outputs["power"], y)
+    ci_loss = torch.zeros((), device=device)
+    if "cloud_index_targets" in batch:
+        ci_targets = batch["cloud_index_targets"].to(device)
+        ci_loss = ci_criterion(outputs["cloud_index"], ci_targets)
+    total_loss = power_loss + ci_weight * ci_loss
+    return total_loss, power_loss, ci_loss, outputs["power"]
+
+
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    power_criterion: nn.Module,
+    ci_criterion: nn.Module,
+    ci_weight: float,
+    device: torch.device,
+) -> tuple[float, np.ndarray, np.ndarray]:
     model.eval()
     total_loss = 0.0
     preds, targets = [], []
     with torch.no_grad():
         for batch in loader:
-            sat = batch["satellite"].to(device)
-            y = batch["targets"].to(device)
-            out = model(sat)
-            loss = criterion(out, y)
+            loss, _, _, power_pred = forward_losses(
+                model=model,
+                batch=batch,
+                power_criterion=power_criterion,
+                ci_criterion=ci_criterion,
+                ci_weight=ci_weight,
+                device=device,
+            )
             total_loss += float(loss.item())
-            preds.append(out.cpu().numpy())
-            targets.append(y.cpu().numpy())
+            preds.append(power_pred.cpu().numpy())
+            targets.append(batch["targets"].numpy())
     return total_loss / max(1, len(loader)), np.concatenate(preds, axis=0), np.concatenate(targets, axis=0)
 
 
@@ -100,7 +131,7 @@ def resolve_model_kwargs(model_cfg: dict, out_dim: int) -> dict:
 
 def validate_preprocessed_artifacts(csv_path: Path, pack_dir: Path, data_cfg: dict) -> None:
     expected_t = int(data_cfg["t_in"])
-    expected_c = len(data_cfg["channels"])
+    expected_c = len(data_cfg["channels"]) + int(bool(data_cfg.get("include_cloud_index_map", False)))
     expected_patch = int(data_cfg["patch_size"])
 
     if csv_path.exists():
@@ -110,7 +141,7 @@ def validate_preprocessed_artifacts(csv_path: Path, pack_dir: Path, data_cfg: di
             sat_paths = ast.literal_eval(row["sat_paths"]) if isinstance(row["sat_paths"], str) else row["sat_paths"]
             channels = ast.literal_eval(row["channels"]) if isinstance(row["channels"], str) else row["channels"]
             patch_size = int(row["patch_size"])
-            if len(sat_paths) != expected_t or len(channels) != expected_c or patch_size != expected_patch:
+            if len(sat_paths) != expected_t or len(channels) != len(data_cfg["channels"]) or patch_size != expected_patch:
                 raise ValueError(
                     "forecast_windows.csv does not match the current config. "
                     "Please rerun pv_forecasting/preprocess_satellite.py."
@@ -137,6 +168,8 @@ def main() -> None:
     data_cfg = cfg["data"]
     train_cfg = cfg["train"]
     model_cfg = cfg["model"]
+    include_cloud_index_map = bool(data_cfg.get("include_cloud_index_map", False))
+    input_channels = len(data_cfg["channels"]) + int(include_cloud_index_map)
 
     run_dir = make_run_dir(args.run_name or cfg.get("name"))
     setup_logging(run_dir)
@@ -151,8 +184,26 @@ def main() -> None:
         train_ds = PackedSatelliteDataset(pack_dir, split="train")
         val_ds = PackedSatelliteDataset(pack_dir, split="val")
     else:
-        train_ds = SatelliteForecastDataset(csv_path, split="train", stats_path=stats_path, peak_power_w=float(data_cfg["peak_power_w"]))
-        val_ds = SatelliteForecastDataset(csv_path, split="val", stats_path=stats_path, peak_power_w=float(data_cfg["peak_power_w"]))
+        train_ds = SatelliteForecastDataset(
+            csv_path,
+            split="train",
+            stats_path=stats_path,
+            satellite_index_csv=PROJECT_ROOT / data_cfg["out_dir"] / "satellite_index.csv",
+            include_cloud_index_map=include_cloud_index_map,
+            cloud_index_source_channel=int(data_cfg.get("cloud_index_source_channel", data_cfg["channels"][0])),
+            cloud_index_lookback_days=int(data_cfg.get("cloud_index_lookback_days", 10)),
+            peak_power_w=float(data_cfg["peak_power_w"]),
+        )
+        val_ds = SatelliteForecastDataset(
+            csv_path,
+            split="val",
+            stats_path=stats_path,
+            satellite_index_csv=PROJECT_ROOT / data_cfg["out_dir"] / "satellite_index.csv",
+            include_cloud_index_map=include_cloud_index_map,
+            cloud_index_source_channel=int(data_cfg.get("cloud_index_source_channel", data_cfg["channels"][0])),
+            cloud_index_lookback_days=int(data_cfg.get("cloud_index_lookback_days", 10)),
+            peak_power_w=float(data_cfg["peak_power_w"]),
+        )
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -177,10 +228,12 @@ def main() -> None:
     )
 
     model = SatelliteOnlyForecaster(
-        in_channels=len(data_cfg["channels"]),
+        in_channels=input_channels,
         **resolve_model_kwargs(model_cfg, out_dim=len(data_cfg["future_offsets_min"])),
     ).to(device)
-    criterion = nn.MSELoss()
+    power_criterion = nn.MSELoss()
+    ci_criterion = nn.L1Loss()
+    ci_weight = float(train_cfg.get("cloud_index_loss_weight", 5.0 if include_cloud_index_map else 0.0))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_cfg["lr"]))
 
     best_val = float("inf")
@@ -192,17 +245,21 @@ def main() -> None:
         model.train()
         total_train = 0.0
         for batch in train_loader:
-            sat = batch["satellite"].to(device)
-            y = batch["targets"].to(device)
             optimizer.zero_grad()
-            out = model(sat)
-            loss = criterion(out, y)
+            loss, _, _, _ = forward_losses(
+                model=model,
+                batch=batch,
+                power_criterion=power_criterion,
+                ci_criterion=ci_criterion,
+                ci_weight=ci_weight,
+                device=device,
+            )
             loss.backward()
             optimizer.step()
             total_train += float(loss.item())
 
         train_loss = total_train / max(1, len(train_loader))
-        val_loss, pred_norm, true_norm = evaluate(model, val_loader, criterion, device)
+        val_loss, pred_norm, true_norm = evaluate(model, val_loader, power_criterion, ci_criterion, ci_weight, device)
         pred_w = pred_norm * peak_power_w
         true_w = true_norm * peak_power_w
         metrics = compute_metrics(pred_w, true_w, horizon_names)
@@ -218,7 +275,7 @@ def main() -> None:
 
     pd.DataFrame(history).to_csv(run_dir / "history.csv", index=False)
     model.load_state_dict(torch.load(run_dir / "best_model.pt", map_location=device))
-    val_loss, pred_norm, true_norm = evaluate(model, val_loader, criterion, device)
+    val_loss, pred_norm, true_norm = evaluate(model, val_loader, power_criterion, ci_criterion, ci_weight, device)
     pred_w = pred_norm * peak_power_w
     true_w = true_norm * peak_power_w
     metrics = compute_metrics(pred_w, true_w, horizon_names)

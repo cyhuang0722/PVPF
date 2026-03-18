@@ -64,7 +64,7 @@ def resolve_model_kwargs(model_cfg: dict, out_dim: int) -> dict:
 
 def validate_preprocessed_artifacts(csv_path: Path, pack_dir: Path, data_cfg: dict) -> None:
     expected_t = int(data_cfg["t_in"])
-    expected_c = len(data_cfg["channels"])
+    expected_c = len(data_cfg["channels"]) + int(bool(data_cfg.get("include_cloud_index_map", False)))
     expected_patch = int(data_cfg["patch_size"])
 
     if csv_path.exists():
@@ -74,7 +74,7 @@ def validate_preprocessed_artifacts(csv_path: Path, pack_dir: Path, data_cfg: di
             sat_paths = ast.literal_eval(row["sat_paths"]) if isinstance(row["sat_paths"], str) else row["sat_paths"]
             channels = ast.literal_eval(row["channels"]) if isinstance(row["channels"], str) else row["channels"]
             patch_size = int(row["patch_size"])
-            if len(sat_paths) != expected_t or len(channels) != expected_c or patch_size != expected_patch:
+            if len(sat_paths) != expected_t or len(channels) != len(data_cfg["channels"]) or patch_size != expected_patch:
                 raise ValueError(
                     "forecast_windows.csv does not match the current config. "
                     "Please rerun pv_forecasting/preprocess_satellite.py."
@@ -102,6 +102,8 @@ def main() -> None:
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     train_cfg = cfg["train"]
+    include_cloud_index_map = bool(data_cfg.get("include_cloud_index_map", False))
+    input_channels = len(data_cfg["channels"]) + int(include_cloud_index_map)
     run_dir = Path(args.run_dir) if args.run_dir else find_latest_run()
     if not run_dir.is_absolute():
         run_dir = PROJECT_ROOT / run_dir
@@ -118,10 +120,19 @@ def main() -> None:
     if pack_dir.exists() and list(pack_dir.glob("batch_*.npz")):
         ds = PackedSatelliteDataset(pack_dir, split=args.split)
     else:
-        ds = SatelliteForecastDataset(csv_path, split=args.split, stats_path=stats_path, peak_power_w=float(data_cfg["peak_power_w"]))
+        ds = SatelliteForecastDataset(
+            csv_path,
+            split=args.split,
+            stats_path=stats_path,
+            satellite_index_csv=PROJECT_ROOT / data_cfg["out_dir"] / "satellite_index.csv",
+            include_cloud_index_map=include_cloud_index_map,
+            cloud_index_source_channel=int(data_cfg.get("cloud_index_source_channel", data_cfg["channels"][0])),
+            cloud_index_lookback_days=int(data_cfg.get("cloud_index_lookback_days", 10)),
+            peak_power_w=float(data_cfg["peak_power_w"]),
+        )
 
     model = SatelliteOnlyForecaster(
-        in_channels=len(data_cfg["channels"]),
+        in_channels=input_channels,
         **resolve_model_kwargs(model_cfg, out_dim=len(data_cfg["future_offsets_min"])),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -134,7 +145,7 @@ def main() -> None:
     with torch.no_grad():
         for batch in loader:
             out = model(batch["satellite"].to(device))
-            preds.append(out.cpu().numpy())
+            preds.append(out["power"].cpu().numpy())
             targets.append(batch["targets"].numpy())
     pred_norm = np.concatenate(preds, axis=0)
     true_norm = np.concatenate(targets, axis=0)

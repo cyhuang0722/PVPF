@@ -10,8 +10,11 @@
     "center_lat": 22.3364,
     "center_lon": 114.2633,
     "channels": [2, 3, 5],
+    "include_cloud_index_map": true,
+    "cloud_index_source_channel": 2,
+    "cloud_index_lookback_days": 10,
     "patch_size": 96,
-    "t_in": 4,
+    "t_in": 5,
     "sat_stride_min": 15,
     "future_offsets_min": [15, 30, 45, 60],
     "match_tolerance_sec": 180.0,
@@ -35,6 +38,7 @@
     "batch_size": 32,
     "epochs": 50,
     "lr": 0.001,
-    "num_workers": 0
+    "num_workers": 0,
+    "cloud_index_loss_weight": 5.0
   }
 }

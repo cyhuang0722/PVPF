@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .satellite_common import (
+    CloudIndexMapProvider,
     SatellitePatchExtractor,
     build_satellite_index,
     chronological_split,
@@ -21,6 +22,39 @@ from .satellite_common import (
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
+
+
+def _match_satellite_paths(
+    sat_ns: np.ndarray,
+    sat_paths: np.ndarray,
+    requested_ts: list[pd.Timestamp],
+    tolerance_sec: float,
+) -> list[str] | None:
+    matched_paths = []
+    used = set()
+    for ts in requested_ts:
+        ts_ns = ts.value
+        idx = np.searchsorted(sat_ns, ts_ns)
+        candidates = []
+        if idx > 0:
+            candidates.append(idx - 1)
+        if idx < len(sat_ns):
+            candidates.append(idx)
+
+        best_idx = None
+        best_delta = None
+        for cand in candidates:
+            if cand in used:
+                continue
+            delta = abs(ts_ns - sat_ns[cand]) / 1e9
+            if delta <= tolerance_sec and (best_delta is None or delta < best_delta):
+                best_idx = cand
+                best_delta = delta
+        if best_idx is None:
+            return None
+        used.add(best_idx)
+        matched_paths.append(str(sat_paths[best_idx]))
+    return matched_paths
 
 
 def build_windows(
@@ -43,52 +77,50 @@ def build_windows(
         if any(ts not in pv_set for ts in required_future):
             continue
 
-        req_sat_ts = [
+        input_sat_ts = [
             t - pd.Timedelta(minutes=sat_stride_min * step)
             for step in range(t_in - 1, -1, -1)
         ]
-        matched_paths = []
-        used = set()
-        ok = True
-        for ts in req_sat_ts:
-            ts_ns = ts.value
-            idx = np.searchsorted(sat_ns, ts_ns)
-            candidates = []
-            if idx > 0:
-                candidates.append(idx - 1)
-            if idx < len(sat_ns):
-                candidates.append(idx)
-
-            best_idx = None
-            best_delta = None
-            for cand in candidates:
-                if cand in used:
-                    continue
-                delta = abs(ts_ns - sat_ns[cand]) / 1e9
-                if delta <= tolerance_sec and (best_delta is None or delta < best_delta):
-                    best_idx = cand
-                    best_delta = delta
-            if best_idx is None:
-                ok = False
-                break
-            used.add(best_idx)
-            matched_paths.append(str(sat_paths[best_idx]))
-
-        if not ok:
+        input_sat_paths = _match_satellite_paths(sat_ns, sat_paths, input_sat_ts, tolerance_sec)
+        future_sat_paths = _match_satellite_paths(sat_ns, sat_paths, required_future, tolerance_sec)
+        if input_sat_paths is None or future_sat_paths is None:
             continue
         rows.append(
             {
                 "ts_pred": t,
-                "sat_paths": matched_paths,
+                "sat_paths": input_sat_paths,
+                "future_sat_paths": future_sat_paths,
                 "targets": [float(pv_series.loc[ts]) for ts in required_future],
             }
         )
     return pd.DataFrame(rows).sort_values("ts_pred").reset_index(drop=True)
 
 
+def build_input_sequence(
+    sat_paths: list[str],
+    extractor: SatellitePatchExtractor,
+    ci_provider: CloudIndexMapProvider | None,
+) -> np.ndarray:
+    frames = []
+    for path in sat_paths:
+        raw = extractor.read_patch(path)
+        if ci_provider is not None:
+            raw = np.concatenate([raw, ci_provider.get_patch(path)[None, :, :]], axis=0)
+        frames.append(raw.astype(np.float32, copy=False))
+    return np.stack(frames, axis=0)
+
+
+def build_cloud_index_targets(
+    future_sat_paths: list[str],
+    ci_provider: CloudIndexMapProvider,
+) -> np.ndarray:
+    return np.stack([ci_provider.get_patch(path) for path in future_sat_paths], axis=0).astype(np.float32, copy=False)
+
+
 def pack_dataset(
     df: pd.DataFrame,
     extractor: SatellitePatchExtractor,
+    ci_provider: CloudIndexMapProvider | None,
     out_dir: Path,
     batch_size: int,
     peak_power_w: float,
@@ -97,26 +129,32 @@ def pack_dataset(
 ) -> None:
     pack_dir = ensure_dir(out_dir / "packed_satellite")
     all_sat = []
+    all_ci = []
     for _, row in df.iterrows():
-        seq = np.stack([extractor.read_patch(path) for path in row["sat_paths"]], axis=0)
+        seq = build_input_sequence(row["sat_paths"], extractor, ci_provider)
         seq = (seq - mean[None, :, None, None]) / std[None, :, None, None]
         all_sat.append(seq.astype(np.float32, copy=False))
+        if ci_provider is not None:
+            all_ci.append(build_cloud_index_targets(row["future_sat_paths"], ci_provider))
 
     all_sat = np.stack(all_sat, axis=0)
     all_targets = np.stack(df["targets"].apply(lambda x: np.asarray(x, dtype=np.float32)).to_list(), axis=0)
     all_targets = all_targets / np.float32(peak_power_w)
+    all_ci_targets = np.stack(all_ci, axis=0) if all_ci else None
     ts_pred = df["ts_pred"].astype(str).to_numpy()
     split = df["split"].astype(str).to_numpy()
 
     for start in range(0, len(df), batch_size):
         end = min(start + batch_size, len(df))
-        np.savez_compressed(
-            pack_dir / f"batch_{start:06d}_{end-1:06d}.npz",
-            satellite=all_sat[start:end],
-            targets=all_targets[start:end],
-            ts_pred=ts_pred[start:end],
-            split=split[start:end],
-        )
+        payload = {
+            "satellite": all_sat[start:end],
+            "targets": all_targets[start:end],
+            "ts_pred": ts_pred[start:end],
+            "split": split[start:end],
+        }
+        if all_ci_targets is not None:
+            payload["cloud_index_targets"] = all_ci_targets[start:end]
+        np.savez_compressed(pack_dir / f"batch_{start:06d}_{end-1:06d}.npz", **payload)
 
 
 def main() -> None:
@@ -174,22 +212,36 @@ def main() -> None:
         center_lon=float(data_cfg["center_lon"]),
         patch_size=int(data_cfg["patch_size"]),
     )
+    ci_provider = None
+    if bool(data_cfg.get("include_cloud_index_map", False)):
+        ci_provider = CloudIndexMapProvider(
+            sat_df=sat_df,
+            source_channel=int(data_cfg.get("cloud_index_source_channel", data_cfg["channels"][0])),
+            lookback_days=int(data_cfg.get("cloud_index_lookback_days", 10)),
+            extractor=extractor,
+        )
     train_df = windows[windows["split"] == "train"].reset_index(drop=True)
     train_sat = np.stack(
-        [
-            np.stack([extractor.read_patch(path) for path in row["sat_paths"]], axis=0)
-            for _, row in train_df.iterrows()
-        ],
+        [build_input_sequence(row["sat_paths"], extractor, ci_provider) for _, row in train_df.iterrows()],
         axis=0,
     )
     mean, std = compute_channel_stats_from_array(train_sat)
-    save_stats(stats_path, mean, std, list(extractor.channels))
+    input_channel_labels: list[int | str] = list(extractor.channels)
+    if ci_provider is not None:
+        input_channel_labels.append("cloud_index_map")
+    save_stats(stats_path, mean, std, input_channel_labels)
     summary["stats_path"] = str(stats_path)
+    summary["num_input_channels"] = int(train_sat.shape[2])
+    summary["include_cloud_index_map"] = bool(ci_provider is not None)
+    if ci_provider is not None:
+        summary["cloud_index_source_channel"] = int(data_cfg.get("cloud_index_source_channel", data_cfg["channels"][0]))
+        summary["cloud_index_lookback_days"] = int(data_cfg.get("cloud_index_lookback_days", 10))
 
     if args.pack:
         pack_dataset(
             df=windows,
             extractor=extractor,
+            ci_provider=ci_provider,
             out_dir=out_dir,
             batch_size=int(data_cfg.get("pack_batch_size", 64)),
             peak_power_w=float(data_cfg["peak_power_w"]),

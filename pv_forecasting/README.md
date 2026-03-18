@@ -57,10 +57,10 @@ python -m pv_forecasting.preprocess_test \
 
 新增一个独立的 satellite-only baseline，思路是：
 
-- 输入过去 `T_in` 帧 FY-4 ROI patch，通道默认用 `0.65 / 0.825 / 1.61 um`，也就是 `[2, 3, 5]`。
-- 每帧经过共享 `CNN` 编码。
-- 得到逐帧 feature map：`[B, T_in, C_enc, H_enc, W_enc]`。
-- 用 `ConvLSTM` 建模云的空间运动，再做 spatial pooling 和 `MLP`，one-shot 输出未来 4 个 horizon：`[t+15, t+30, t+45, t+60]`。
+- 输入过去 `T_in=5` 帧 FY-4 ROI patch。
+- 原始输入默认用 `0.65 / 0.825 / 1.61 um` 三个通道，也就是 `[2, 3, 5]`，并额外为 `0.65 um` 通道构造 `cloud index map`。
+- 模型 backbone 改成更接近论文的 `shared spatial encoder + 3D temporal encoder + recurrent future states`。
+- 训练目标不再只有功率，而是同时预测未来 4 个 horizon 的 `power` 和 `cloud index map`。
 
 默认配置文件在 [satellite_only_baseline.json](/Users/huangchouyue/Projects/PVPF/pv_forecasting/configs/satellite_only_baseline.json)。
 
@@ -89,6 +89,6 @@ python -m pv_forecasting.infer_satellite \
 几个实现约定：
 
 - ROI 数据默认读取 `data/satellite/roi`。
-- patch 默认围绕 `(22.3364, 114.2633)` 裁 `15x15`。
-- 预处理对 `[2,3,5]` 这几个 VIS/NIR 通道直接使用 `CALChannel` 查表后的值，也就是以反射率表征作为模型输入，再在训练集上统计 channel mean/std。
+- patch 默认围绕 `(22.3364, 114.2633)` 裁 `96x96`。
+- 预处理对 `[2,3,5]` 这几个 VIS/NIR 通道直接使用 `CALChannel` 查表后的值，也就是以反射率表征作为模型输入；同时按论文里的定义，用最近 `10` 天同一时刻的像素最小值和当前帧最大值构造 `cloud index map`。
 - `targets` 统一按 `peak_power_w=66300` 做归一化训练，评估时再还原回 W，输出每个 horizon 的 `RMSE / MAE` 和 `mean_rmse_W`。
