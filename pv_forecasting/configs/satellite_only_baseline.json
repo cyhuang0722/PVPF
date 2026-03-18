@@ -1,0 +1,41 @@
+{
+  "name": "satellite_only_baseline",
+  "data": {
+    "roi_dir": "data/satellite/roi",
+    "pv_csv": "data/power/power-LSK_N.csv",
+    "pv_value_col": "value",
+    "out_dir": "pv_forecasting/derived_satellite",
+    "stats_filename": "satellite_stats.json",
+    "timezone": "Asia/Hong_Kong",
+    "center_lat": 22.3364,
+    "center_lon": 114.2633,
+    "channels": [2, 3, 5],
+    "patch_size": 15,
+    "t_in": 4,
+    "sat_stride_min": 15,
+    "future_offsets_min": [15, 30, 45, 60],
+    "match_tolerance_sec": 180.0,
+    "peak_power_w": 66300.0,
+    "pack_batch_size": 64
+  },
+  "split": {
+    "train_ratio": 0.7,
+    "val_ratio": 0.15
+  },
+  "model": {
+    "encoder_channels": [32, 64, 128],
+    "convlstm_hidden_dim": 128,
+    "convlstm_layers": 1,
+    "convlstm_kernel_size": 3,
+    "head_hidden_dim": 128,
+    "dropout": 0.2,
+    "debug_shapes": true
+  },
+  "train": {
+    "seed": 42,
+    "batch_size": 32,
+    "epochs": 50,
+    "lr": 0.001,
+    "num_workers": 0
+  }
+}

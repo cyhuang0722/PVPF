@@ -78,6 +78,7 @@ def main() -> None:
         head_hidden_dim=int(model_cfg.get("head_hidden_dim", 128)),
         dropout=float(model_cfg.get("dropout", 0.2)),
         out_dim=len(data_cfg["future_offsets_min"]),
+        debug_shapes=bool(model_cfg.get("debug_shapes", False)),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.load_state_dict(torch.load(best_path, map_location=device))

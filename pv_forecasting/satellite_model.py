@@ -9,13 +9,15 @@ class SatelliteEncoder(nn.Module):
         super().__init__()
         layers = []
         prev = in_channels
-        for out in hidden_channels:
+        last_idx = len(hidden_channels) - 1
+        for idx, out in enumerate(hidden_channels):
+            stride = 1 if idx == last_idx else 2
             layers.extend(
                 [
                     nn.Conv2d(prev, out, kernel_size=3, stride=1, padding=1),
                     nn.BatchNorm2d(out),
                     nn.ReLU(inplace=True),
-                    nn.Conv2d(out, out, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2d(out, out, kernel_size=3, stride=stride, padding=1),
                     nn.BatchNorm2d(out),
                     nn.ReLU(inplace=True),
                 ]
@@ -122,6 +124,7 @@ class SatelliteOnlyForecaster(nn.Module):
         head_hidden_dim: int = 128,
         dropout: float = 0.2,
         out_dim: int = 4,
+        debug_shapes: bool = False,
     ) -> None:
         super().__init__()
         self.encoder = SatelliteEncoder(in_channels=in_channels, hidden_channels=encoder_channels)
@@ -137,11 +140,19 @@ class SatelliteOnlyForecaster(nn.Module):
             out_dim=out_dim,
             dropout=dropout,
         )
+        self.debug_shapes = debug_shapes
+        self._debug_shapes_printed = False
 
     def forward(self, satellite: torch.Tensor) -> torch.Tensor:
         bsz, steps, channels, height, width = satellite.shape
-        encoded = self.encoder(satellite.reshape(bsz * steps, channels, height, width))
-        encoded = encoded.reshape(bsz, steps, encoded.shape[1], encoded.shape[2], encoded.shape[3])
+        encoded_flat = self.encoder(satellite.reshape(bsz * steps, channels, height, width))
+        encoded = encoded_flat.reshape(bsz, steps, encoded_flat.shape[1], encoded_flat.shape[2], encoded_flat.shape[3])
         context_map = self.temporal_model(encoded)
+        if self.debug_shapes and not self._debug_shapes_printed:
+            print(f"[debug] input satellite: {tuple(satellite.shape)}")
+            print(f"[debug] encoded per-frame: {tuple(encoded_flat.shape)}")
+            print(f"[debug] reshaped encoded: {tuple(encoded.shape)}")
+            print(f"[debug] context_map: {tuple(context_map.shape)}")
+            self._debug_shapes_printed = True
         pooled = context_map.mean(dim=(-2, -1))
         return self.head(pooled)

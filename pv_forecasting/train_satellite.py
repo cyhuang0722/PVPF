@@ -134,6 +134,7 @@ def main() -> None:
         head_hidden_dim=int(model_cfg.get("head_hidden_dim", 128)),
         dropout=float(model_cfg.get("dropout", 0.2)),
         out_dim=len(data_cfg["future_offsets_min"]),
+        debug_shapes=bool(model_cfg.get("debug_shapes", False)),
     ).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=float(train_cfg["lr"]))
