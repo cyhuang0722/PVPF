@@ -52,3 +52,43 @@ python -m pv_forecasting.preprocess_test \
 - 融合：concat(192) → MLP → 5 维（MSE 损失，可选按 horizon 加权）。
 
 依赖：PyTorch、pandas、numpy、PIL；预处理复用 `pv_output_prediction.preproces_data`（图像索引与 PV 加载）。
+
+## Satellite-Only Baseline
+
+新增一个独立的 satellite-only baseline，思路是：
+
+- 输入过去 `T_in` 帧 FY-4 ROI patch，通道默认用 `0.65 / 0.825 / 1.61 um`，也就是 `[2, 3, 5]`。
+- 每帧经过共享 `CNN` 编码。
+- 得到逐帧 feature map：`[B, T_in, C_enc, H_enc, W_enc]`。
+- 用 `ConvLSTM` 建模云的空间运动，再做 spatial pooling 和 `MLP`，one-shot 输出未来 4 个 horizon：`[t+15, t+30, t+45, t+60]`。
+
+默认配置文件在 [satellite_only_baseline.json](/Users/huangchouyue/Projects/PVPF/pv_forecasting/configs/satellite_only_baseline.json)。
+
+```bash
+# 1. 预处理 ROI 序列，生成 forecast_windows.csv、训练集通道 mean/std
+python -m pv_forecasting.preprocess_satellite \
+  --config pv_forecasting/configs/satellite_only_baseline.json
+
+# 2. 可选：同时把标准化后的 patch 序列打包成 npz shards，加快训练
+python -m pv_forecasting.preprocess_satellite \
+  --config pv_forecasting/configs/satellite_only_baseline.json \
+  --pack
+
+# 3. 训练 satellite-only baseline
+python -m pv_forecasting.train_satellite \
+  --config pv_forecasting/configs/satellite_only_baseline.json \
+  --run-name sat_only
+
+# 4. 对 train/val/test split 做推理
+python -m pv_forecasting.infer_satellite \
+  --config pv_forecasting/configs/satellite_only_baseline.json \
+  --run-dir pv_forecasting/model_output/run_xxx_sat_only \
+  --split val
+```
+
+几个实现约定：
+
+- ROI 数据默认读取 `data/satellite/roi`。
+- patch 默认围绕 `(22.3364, 114.2633)` 裁 `15x15`。
+- 预处理对 `[2,3,5]` 这几个 VIS/NIR 通道直接使用 `CALChannel` 查表后的值，也就是以反射率表征作为模型输入，再在训练集上统计 channel mean/std。
+- `targets` 统一按 `peak_power_w=66300` 做归一化训练，评估时再还原回 W，输出每个 horizon 的 `RMSE / MAE` 和 `mean_rmse_W`。
