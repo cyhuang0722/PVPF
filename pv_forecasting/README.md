@@ -84,6 +84,16 @@ python -m pv_forecasting.infer_satellite \
   --config pv_forecasting/configs/satellite_only_baseline.json \
   --run-dir pv_forecasting/model_output/run_xxx_sat_only \
   --split val
+
+  
+# 画图
+python -m pv_forecasting.plot_predictions pv_forecasting/model_output/run_20260308-004432 --split test --start '2026-03-05 08:00' --end '2026-03-05 18:00'  --format png
+
+python -m pv_forecasting.plot_predictions pv_forecasting/model_output/run_20260308-004432 \
+  --split test \
+  --start "2026-02-24 08:00" \
+  --end "2026-03-07 18:00" \
+  --format png
 ```
 
 几个实现约定：
