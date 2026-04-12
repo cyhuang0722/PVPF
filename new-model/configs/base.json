@@ -88,6 +88,11 @@
     "weight_decay": 0.0001,
     "num_workers": 0,
     "early_stopping_patience": 6,
-    "save_top_k_visualizations": 6
+    "save_top_k_visualizations": 6,
+    "visualization_category_counts": {
+      "largest_error": 2,
+      "representative": 2,
+      "midday": 2
+    }
   }
 }

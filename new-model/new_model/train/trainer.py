@@ -55,12 +55,114 @@ def _target_to_w(quantiles: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_i
     return quantiles
 
 
+def _visual_category_counts(train_cfg: dict) -> dict[str, int]:
+    configured = train_cfg.get("visualization_category_counts")
+    if isinstance(configured, dict):
+        counts = {
+            "largest_error": int(configured.get("largest_error", 0)),
+            "representative": int(configured.get("representative", 0)),
+            "midday": int(configured.get("midday", 0)),
+        }
+    else:
+        total = int(train_cfg.get("save_top_k_visualizations", 6))
+        base = total // 3
+        remainder = total % 3
+        counts = {
+            "largest_error": base + (1 if remainder > 0 else 0),
+            "representative": base + (1 if remainder > 1 else 0),
+            "midday": base,
+        }
+    return counts
+
+
+def _select_visual_samples(pred_df: pd.DataFrame, train_cfg: dict) -> list[dict[str, int | str]]:
+    if pred_df.empty:
+        return []
+
+    counts = _visual_category_counts(train_cfg)
+    total_requested = sum(counts.values())
+    if total_requested <= 0:
+        return []
+
+    work_df = pred_df.copy()
+    work_df["abs_error_w"] = (work_df["pred_q50_w"] - work_df["target_pv_w"]).abs()
+    median_abs_error = float(work_df["abs_error_w"].median())
+    ts_target = pd.to_datetime(work_df["ts_target"])
+    work_df["seconds_to_noon"] = (
+        ts_target.dt.hour * 3600 + ts_target.dt.minute * 60 + ts_target.dt.second - 12 * 3600
+    ).abs()
+    work_df["representative_gap"] = (work_df["abs_error_w"] - median_abs_error).abs()
+
+    ranked_frames = {
+        "largest_error": work_df.sort_values(["abs_error_w", "ts_target"], ascending=[False, True]),
+        "representative": work_df.sort_values(["representative_gap", "seconds_to_noon", "ts_target"]),
+        "midday": work_df.sort_values(["seconds_to_noon", "abs_error_w", "ts_target"]),
+    }
+
+    chosen: list[dict[str, int | str]] = []
+    used_indices: set[int] = set()
+
+    for category in ("largest_error", "representative", "midday"):
+        remaining = counts.get(category, 0)
+        if remaining <= 0:
+            continue
+        for _, row in ranked_frames[category].iterrows():
+            sample_index = int(row["sample_index"])
+            if sample_index in used_indices:
+                continue
+            chosen.append({"sample_index": sample_index, "category": category})
+            used_indices.add(sample_index)
+            remaining -= 1
+            if remaining == 0:
+                break
+
+    if len(chosen) < total_requested:
+        fallback = ranked_frames["largest_error"]
+        for _, row in fallback.iterrows():
+            sample_index = int(row["sample_index"])
+            if sample_index in used_indices:
+                continue
+            chosen.append({"sample_index": sample_index, "category": "largest_error"})
+            used_indices.add(sample_index)
+            if len(chosen) == total_requested:
+                break
+
+    return chosen
+
+
+def _build_visual_item(
+    model: MinimalSunConditionedPVModel,
+    dataset: SunConditionedPVDataset,
+    sample_index: int,
+    device: torch.device,
+) -> dict[str, np.ndarray | str]:
+    model.eval()
+    raw = dataset[sample_index]
+    batch = {}
+    for key, value in raw.items():
+        if torch.is_tensor(value):
+            batch[key] = value.unsqueeze(0).to(device)
+        else:
+            batch[key] = value
+
+    with torch.no_grad():
+        out = model(batch["images"], batch["pv_history"], batch["solar_vec"])
+
+    frame = dataset.df.iloc[sample_index]
+    return {
+        "image": batch["images"][0, -1].detach().cpu().numpy(),
+        "motion": out["motion_fields"][0, -1].detach().cpu().numpy(),
+        "attention": out["attention_map"][0].detach().cpu().numpy(),
+        "title": str(frame["ts_target"]),
+    }
+
+
 def _evaluate_split(
     model: MinimalSunConditionedPVModel,
     dataset: SunConditionedPVDataset,
     config: dict,
     device: torch.device,
-) -> tuple[pd.DataFrame, dict[str, float], list[dict]]:
+) -> tuple[pd.DataFrame, dict[str, float]]:
     loader = _make_loader(
         dataset,
         batch_size=int(config["train"]["batch_size"]),
@@ -70,7 +172,6 @@ def _evaluate_split(
     model.eval()
     use_csi = bool(config["data"].get("use_clear_sky_index", True))
     rows: list[dict] = []
-    visuals: list[dict] = []
 
     with torch.no_grad():
         for batch in loader:
@@ -97,22 +198,9 @@ def _evaluate_split(
                         "pred_q10_w": float(pred_w[i, 0]),
                         "pred_q50_w": float(pred_w[i, 1]),
                         "pred_q90_w": float(pred_w[i, 2]),
+                        "sample_index": int(meta_idx[i]),
                     }
                 )
-
-            if len(visuals) < int(config["train"]["save_top_k_visualizations"]):
-                imgs = data["images"].cpu().numpy()
-                flows = out["motion_fields"].cpu().numpy()
-                attn = out["attention_map"].cpu().numpy()
-                for i in range(min(len(meta_idx), int(config["train"]["save_top_k_visualizations"]) - len(visuals))):
-                    visuals.append(
-                        {
-                            "image": imgs[i, -1],
-                            "motion": flows[i, -1],
-                            "attention": attn[i],
-                            "title": str(dataset.df.iloc[int(meta_idx[i])]["ts_target"]),
-                        }
-                    )
 
     pred_df = pd.DataFrame(rows).sort_values("ts_target").reset_index(drop=True)
     pred_q = pred_df[["pred_q10_w", "pred_q50_w", "pred_q90_w"]].to_numpy(dtype=np.float32)
@@ -120,7 +208,7 @@ def _evaluate_split(
     metrics = regression_metrics(pred_df["pred_q50_w"].to_numpy(dtype=np.float32), true_w)
     metrics["pinball_loss"] = pinball_loss_numpy(pred_q, true_w, config["loss"]["quantiles"])
     metrics.update(interval_metrics(pred_q, true_w))
-    return pred_df, metrics, visuals
+    return pred_df, metrics
 
 
 def train_model(config: dict) -> Path:
@@ -206,7 +294,7 @@ def train_model(config: dict) -> Path:
 
         scheduler.step()
 
-        val_pred, val_metrics, _ = _evaluate_split(model, val_ds, config, device)
+        val_pred, val_metrics = _evaluate_split(model, val_ds, config, device)
         history_row = {
             "epoch": epoch,
             "train_loss": float(np.mean(epoch_losses)),
@@ -240,7 +328,7 @@ def train_model(config: dict) -> Path:
 
     model.load_state_dict(torch.load(run_dir / "best_model.pt", map_location=device))
     for split_name, split_ds in (("train", train_ds), ("val", val_ds), ("test", test_ds)):
-        pred_df, metrics, visuals = _evaluate_split(model, split_ds, config, device)
+        pred_df, metrics = _evaluate_split(model, split_ds, config, device)
         pred_df.to_csv(run_dir / f"predictions_{split_name}.csv", index=False)
         save_json(run_dir / f"metrics_{split_name}.json", metrics)
 
@@ -250,14 +338,17 @@ def train_model(config: dict) -> Path:
                 run_dir / "figures" / f"forecast_band_{split_name}.png",
                 title=f"{split_name} forecast band",
             )
-        for idx, item in enumerate(visuals[: int(config["train"]["save_top_k_visualizations"])]):
+        selected_visuals = _select_visual_samples(pred_df, config["train"])
+        for idx, selection in enumerate(selected_visuals):
+            item = _build_visual_item(model, split_ds, int(selection["sample_index"]), device)
             save_motion_attention_figure(
                 image=item["image"],
                 motion=item["motion"],
                 attention=item["attention"],
-                out_path=run_dir / "figures" / f"motion_attention_{split_name}_{idx:02d}.png",
-                title=item["title"],
+                out_path=run_dir
+                / "figures"
+                / f"motion_attention_{split_name}_{idx:02d}_{selection['category']}.png",
+                title=f"{item['title']} | {selection['category']}",
             )
 
     return run_dir
-
