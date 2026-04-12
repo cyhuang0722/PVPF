@@ -1,0 +1,24 @@
+{
+    "model": "fisheye_equidistant",
+    "version": "1.0",
+    "site": {
+      "lat": 22.33257724541564,
+      "lon": 114.26699324044685,
+      "timezone": "Asia/Singapore"
+    },
+    "intrinsics": {
+      "cx": 1576.82,
+      "cy": 1485.44,
+      "f_px_per_rad": 1040.60
+    },
+    "mapping": {
+      "theta_rad_from_pixel": "theta = sqrt((u-cx)^2 + (v-cy)^2) / f",
+      "zenith_deg_from_theta_rad": "zenith_deg = theta * 180/pi"
+    },
+    "fit_summary": {
+      "n_samples": 168,
+      "median_abs_residual_px": 0.12,
+      "p95_abs_residual_px": 0.77,
+      "note": "Residuals are after geometry-constrained centroid refinement using ephemeris theta; use for zenith mapping calibration."
+    }
+  }

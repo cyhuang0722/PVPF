@@ -1,0 +1,18 @@
+{
+  "n_images_indexed": 53957,
+  "n_pv_rows": 7104,
+  "n_candidate_targets": 7104,
+  "n_samples": 3180,
+  "n_missing_image": 54,
+  "n_missing_pv": 3761,
+  "n_filtered_sun_edge": 4,
+  "image_size": [
+    256,
+    256
+  ],
+  "source_image_size": [
+    256,
+    256
+  ],
+  "samples_csv": "/Users/huangchouyue/Projects/PVPF/new-model/artifacts/dataset/samples.csv"
+}

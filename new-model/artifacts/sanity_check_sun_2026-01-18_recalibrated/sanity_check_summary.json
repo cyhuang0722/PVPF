@@ -1,0 +1,8 @@
+{
+  "dates": [
+    "2026-01-18"
+  ],
+  "samples_per_day": 7,
+  "n_outputs": 7,
+  "summary_csv": "/Users/huangchouyue/Projects/PVPF/new-model/artifacts/sanity_check_sun_2026-01-18_recalibrated/sanity_check_summary.csv"
+}
