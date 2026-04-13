@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 import numpy as np
@@ -169,6 +170,7 @@ class PreprocessedConvLSTMDataset(Dataset):
     def __init__(
         self,
         samples_csv: Path,
+        split: str | None = None,
         image_size: tuple[int, int] = (128, 128),
         channels: int = 1,
         sky_mask_path: Path | None = None,
@@ -187,15 +189,29 @@ class PreprocessedConvLSTMDataset(Dataset):
             mask_1hw = load_and_resize_sky_mask(Path(sky_mask_path), h, w)
             self.sky_mask = mask_1hw if self.channels == 1 else np.repeat(mask_1hw, repeats=3, axis=0)
         self.df = pd.read_csv(self.samples_csv)
-        required = [
-            "ts_anchor",
-            "ts_target",
-            "img_paths",
-            "pv_target_w",
-        ]
+        if split is not None:
+            if "split" not in self.df.columns:
+                raise ValueError("samples csv missing required column: split")
+            self.df = self.df[self.df["split"] == split].reset_index(drop=True)
+        required = ["ts_anchor", "ts_target", "img_paths"]
         missing = [c for c in required if c not in self.df.columns]
         if missing:
             raise ValueError(f"samples csv missing columns: {missing}")
+        if "target_value" not in self.df.columns:
+            if "pv_target_w" in self.df.columns:
+                self.df["target_value"] = self.df["pv_target_w"].astype(np.float32)
+            elif "target_pv_w" in self.df.columns:
+                self.df["target_value"] = self.df["target_pv_w"].astype(np.float32)
+            else:
+                raise ValueError("samples csv must include target_value or pv_target_w/target_pv_w")
+        if "target_pv_w" not in self.df.columns:
+            if "pv_target_w" in self.df.columns:
+                self.df["target_pv_w"] = self.df["pv_target_w"].astype(np.float32)
+            else:
+                raise ValueError("samples csv must include target_pv_w or pv_target_w")
+        if "target_clear_sky_w" not in self.df.columns:
+            self.df["target_clear_sky_w"] = np.ones(len(self.df), dtype=np.float32)
+        self.df = self.df.reset_index(drop=True)
 
     def _rewrite_path(self, path: str) -> str:
         if self.camera_path_prefix_from and self.camera_path_prefix_to:
@@ -221,7 +237,10 @@ class PreprocessedConvLSTMDataset(Dataset):
         row = self.df.iloc[idx]
         paths_raw = row["img_paths"]
         if isinstance(paths_raw, str):
-            paths = list(ast.literal_eval(paths_raw))
+            try:
+                paths = list(json.loads(paths_raw))
+            except json.JSONDecodeError:
+                paths = list(ast.literal_eval(paths_raw))
         else:
             paths = list(paths_raw)
         paths = [self._rewrite_path(str(p)) for p in paths]
@@ -229,10 +248,15 @@ class PreprocessedConvLSTMDataset(Dataset):
         x = np.stack(frames, axis=0)
         if self.sky_mask is not None:
             x = x * self.sky_mask[None, ...]
-        y = np.float32(row["pv_target_w"])
+        target_value = np.float32(row["target_value"])
+        target_pv_w = np.float32(row["target_pv_w"])
+        target_clear_sky_w = np.float32(row["target_clear_sky_w"])
         return {
             "x_seq": torch.from_numpy(x),
-            "y": torch.tensor(y),
+            "target": torch.tensor(target_value),
+            "target_pv_w": torch.tensor(target_pv_w),
+            "target_clear_sky_w": torch.tensor(target_clear_sky_w),
+            "meta_index": torch.tensor(idx, dtype=torch.long),
             "t_anchor": str(row["ts_anchor"]),
             "t_target": str(row["ts_target"]),
         }
