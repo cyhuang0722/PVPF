@@ -17,13 +17,12 @@ class QuantileForecastHead(nn.Module):
             nn.GELU(),
             nn.Linear(64, out_dim),
         )
-        self.softplus = nn.Softplus()
 
     def forward(self, fused: torch.Tensor) -> torch.Tensor:
         raw = self.net(fused)
         q50 = torch.sigmoid(raw[:, 0:1])
-        d1 = self.softplus(raw[:, 1:2])
-        d2 = self.softplus(raw[:, 2:3])
-        q10 = torch.clamp(q50 - d1, min=0.0, max=1.0)
-        q90 = torch.clamp(q50 + d2, min=0.0, max=1.0)
+        lower_frac = torch.sigmoid(raw[:, 1:2])
+        upper_frac = torch.sigmoid(raw[:, 2:3])
+        q10 = q50 * (1.0 - lower_frac)
+        q90 = q50 + (1.0 - q50) * upper_frac
         return torch.cat([q10, q50, q90], dim=1)
