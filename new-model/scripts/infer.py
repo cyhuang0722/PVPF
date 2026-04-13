@@ -37,6 +37,7 @@ def main() -> None:
         split=args.split,
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
+        peak_power_w=float(config["data"]["peak_power_w"]),
     )
     model = MinimalSunConditionedPVModel(config["model"]).to(device)
     model.load_state_dict(torch.load(run_dir / "best_model.pt", map_location=device))

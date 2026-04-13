@@ -50,6 +50,7 @@ def _to_device(batch: dict, device: torch.device) -> dict:
 
 
 def _target_to_w(prediction: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_index: bool) -> np.ndarray:
+    prediction = np.clip(prediction, a_min=0.0, a_max=1.0 if use_clear_sky_index else None)
     if use_clear_sky_index:
         values_w = prediction * clear_sky_w
     else:
@@ -182,6 +183,7 @@ def _evaluate_split(
             pred = out["prediction"].squeeze(-1).cpu().numpy()
             clear_sky_w = data["target_clear_sky_w"].cpu().numpy()
             pred_w = _target_to_w(pred, clear_sky_w, use_csi)
+            pred_eval = np.clip(pred, a_min=0.0, a_max=1.0 if use_csi else None)
             target_w = data["target_pv_w"].cpu().numpy()
             meta_idx = data["meta_index"].cpu().numpy()
 
@@ -194,7 +196,8 @@ def _evaluate_split(
                         "target_value": float(data["target"][i].cpu().item()),
                         "target_pv_w": float(target_w[i]),
                         "target_clear_sky_w": float(clear_sky_w[i]),
-                        "pred_value": float(pred[i]),
+                        "pred_value": float(pred_eval[i]),
+                        "pred_value_raw": float(pred[i]),
                         "pred_w": float(pred_w[i]),
                         "sample_index": int(meta_idx[i]),
                     }
@@ -225,18 +228,21 @@ def train_model(config: dict) -> Path:
         split="train",
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
+        peak_power_w=float(config["data"]["peak_power_w"]),
     )
     val_ds = SunConditionedPVDataset(
         csv_path=config["data"]["samples_csv"],
         split="val",
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
+        peak_power_w=float(config["data"]["peak_power_w"]),
     )
     test_ds = SunConditionedPVDataset(
         csv_path=config["data"]["samples_csv"],
         split="test",
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
+        peak_power_w=float(config["data"]["peak_power_w"]),
     )
     logger.info("Dataset sizes train=%d val=%d test=%d", len(train_ds), len(val_ds), len(test_ds))
 

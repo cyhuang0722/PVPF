@@ -19,4 +19,4 @@ class DeterministicForecastHead(nn.Module):
         )
 
     def forward(self, fused: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.net(fused))
+        return self.net(fused)

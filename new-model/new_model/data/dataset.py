@@ -31,6 +31,7 @@ class SunConditionedPVDataset(Dataset):
         split: str,
         image_size: tuple[int, int],
         sky_mask_path: str | Path | None = None,
+        peak_power_w: float | None = None,
     ) -> None:
         self.df = pd.read_csv(csv_path)
         self.df["ts_anchor"] = pd.to_datetime(self.df["ts_anchor"])
@@ -38,6 +39,9 @@ class SunConditionedPVDataset(Dataset):
         self.df = self.df[self.df["split"] == split].reset_index(drop=True)
         self.image_size = image_size
         self.mask = load_mask(sky_mask_path, image_size) if sky_mask_path and Path(sky_mask_path).exists() else None
+        self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
+        if self.peak_power_w <= 0:
+            raise ValueError("peak_power_w must be positive.")
 
     def __len__(self) -> int:
         return len(self.df)
@@ -63,7 +67,7 @@ class SunConditionedPVDataset(Dataset):
 
         return {
             "images": torch.from_numpy(frames.astype(np.float32)),
-            "pv_history": torch.tensor(np.asarray(past_pv, dtype=np.float32)),
+            "pv_history": torch.tensor(np.asarray(past_pv, dtype=np.float32) / self.peak_power_w),
             "solar_vec": torch.tensor(np.asarray(solar_vec, dtype=np.float32)),
             "target": torch.tensor(float(row["target_value"]), dtype=torch.float32),
             "target_pv_w": torch.tensor(float(row["target_pv_w"]), dtype=torch.float32),
