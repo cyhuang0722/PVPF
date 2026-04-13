@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .forecast_head import QuantileForecastHead
+from .forecast_head import DeterministicForecastHead
 from .frame_encoder import FrameEncoder
 from .motion_aggregator import MotionAggregator
 from .motion_field_head import MotionFieldHead
@@ -32,11 +32,11 @@ class MinimalSunConditionedPVModel(nn.Module):
             attention_dim=attention_dim,
         )
         self.pv_encoder = PVHistoryEncoder(in_dim=4, hidden_dim=model_cfg["pv_hidden_dim"])
-        self.head = QuantileForecastHead(
+        self.head = DeterministicForecastHead(
             in_dim=attention_dim + model_cfg["pv_hidden_dim"],
             hidden_dim=model_cfg["fusion_hidden_dim"],
             dropout=float(model_cfg["dropout"]),
-            out_dim=3,
+            out_dim=1,
         )
 
     def forward(self, images: torch.Tensor, pv_history: torch.Tensor, solar_vec: torch.Tensor) -> dict:
@@ -56,12 +56,11 @@ class MinimalSunConditionedPVModel(nn.Module):
         fused_map = torch.cat([last_feature, motion_feature], dim=1)
         sun_feature, attention_map = self.sun_attention(fused_map, solar_vec)
         pv_feature = self.pv_encoder(pv_history)
-        quantiles = self.head(torch.cat([sun_feature, pv_feature], dim=1))
+        prediction = self.head(torch.cat([sun_feature, pv_feature], dim=1))
 
         return {
-            "quantiles": quantiles,
+            "prediction": prediction,
             "motion_fields": motion_fields,
             "frame_features": feats,
             "attention_map": attention_map,
         }
-

@@ -6,16 +6,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..data.dataset import SunConditionedPVDataset
 from ..losses.motion import motion_regularization_loss
-from ..losses.quantile import quantile_crossing_penalty, quantile_loss
 from ..models.full_model import MinimalSunConditionedPVModel
 from ..utils.io import ensure_dir, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
 from ..viz.motion import save_motion_attention_figure
-from .metrics import interval_metrics, pinball_loss_numpy, regression_metrics
+from .metrics import regression_metrics
 
 
 def _setup_logger(run_dir: Path) -> logging.Logger:
@@ -49,11 +49,11 @@ def _to_device(batch: dict, device: torch.device) -> dict:
     return moved
 
 
-def _target_to_w(quantiles: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_index: bool) -> np.ndarray:
+def _target_to_w(prediction: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_index: bool) -> np.ndarray:
     if use_clear_sky_index:
-        values_w = quantiles * clear_sky_w[:, None]
+        values_w = prediction * clear_sky_w
     else:
-        values_w = quantiles
+        values_w = prediction
     return np.clip(values_w, a_min=0.0, a_max=None)
 
 
@@ -87,7 +87,7 @@ def _select_visual_samples(pred_df: pd.DataFrame, train_cfg: dict) -> list[dict[
         return []
 
     work_df = pred_df.copy()
-    work_df["abs_error_w"] = (work_df["pred_q50_w"] - work_df["target_pv_w"]).abs()
+    work_df["abs_error_w"] = (work_df["pred_w"] - work_df["target_pv_w"]).abs()
     median_abs_error = float(work_df["abs_error_w"].median())
     ts_target = pd.to_datetime(work_df["ts_target"])
     work_df["seconds_to_noon"] = (
@@ -179,9 +179,9 @@ def _evaluate_split(
         for batch in loader:
             data = _to_device(batch, device)
             out = model(data["images"], data["pv_history"], data["solar_vec"])
-            q = out["quantiles"].cpu().numpy()
+            pred = out["prediction"].squeeze(-1).cpu().numpy()
             clear_sky_w = data["target_clear_sky_w"].cpu().numpy()
-            pred_w = _target_to_w(q, clear_sky_w, use_csi)
+            pred_w = _target_to_w(pred, clear_sky_w, use_csi)
             target_w = data["target_pv_w"].cpu().numpy()
             meta_idx = data["meta_index"].cpu().numpy()
 
@@ -194,22 +194,15 @@ def _evaluate_split(
                         "target_value": float(data["target"][i].cpu().item()),
                         "target_pv_w": float(target_w[i]),
                         "target_clear_sky_w": float(clear_sky_w[i]),
-                        "pred_q10": float(q[i, 0]),
-                        "pred_q50": float(q[i, 1]),
-                        "pred_q90": float(q[i, 2]),
-                        "pred_q10_w": float(pred_w[i, 0]),
-                        "pred_q50_w": float(pred_w[i, 1]),
-                        "pred_q90_w": float(pred_w[i, 2]),
+                        "pred_value": float(pred[i]),
+                        "pred_w": float(pred_w[i]),
                         "sample_index": int(meta_idx[i]),
                     }
                 )
 
     pred_df = pd.DataFrame(rows).sort_values("ts_target").reset_index(drop=True)
-    pred_q = pred_df[["pred_q10_w", "pred_q50_w", "pred_q90_w"]].to_numpy(dtype=np.float32)
     true_w = pred_df["target_pv_w"].to_numpy(dtype=np.float32)
-    metrics = regression_metrics(pred_df["pred_q50_w"].to_numpy(dtype=np.float32), true_w)
-    metrics["pinball_loss"] = pinball_loss_numpy(pred_q, true_w, config["loss"]["quantiles"])
-    metrics.update(interval_metrics(pred_q, true_w))
+    metrics = regression_metrics(pred_df["pred_w"].to_numpy(dtype=np.float32), true_w)
     return pred_df, metrics
 
 
@@ -269,29 +262,27 @@ def train_model(config: dict) -> Path:
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
         epoch_losses: list[float] = []
-        epoch_q_losses: list[float] = []
+        epoch_reg_losses: list[float] = []
         epoch_motion_losses: list[float] = []
 
         for batch in train_loader:
             data = _to_device(batch, device)
             optimizer.zero_grad()
             out = model(data["images"], data["pv_history"], data["solar_vec"])
-            q_loss = quantile_loss(out["quantiles"], data["target"], config["loss"]["quantiles"])
+            pred = out["prediction"].squeeze(-1)
+            reg_loss = F.mse_loss(pred, data["target"])
             motion_loss, motion_stats = motion_regularization_loss(
                 out["frame_features"],
                 out["motion_fields"],
                 warp_weight=float(config["loss"]["warp_weight"]),
                 smooth_weight=float(config["loss"]["smooth_weight"]),
             )
-            crossing = quantile_crossing_penalty(out["quantiles"])
-            total = q_loss + float(config["loss"]["motion_loss_weight"]) * motion_loss + float(
-                config["loss"]["quantile_crossing_weight"]
-            ) * crossing
+            total = reg_loss + float(config["loss"]["motion_loss_weight"]) * motion_loss
             total.backward()
             optimizer.step()
 
             epoch_losses.append(float(total.detach().cpu()))
-            epoch_q_losses.append(float(q_loss.detach().cpu()))
+            epoch_reg_losses.append(float(reg_loss.detach().cpu()))
             epoch_motion_losses.append(float(motion_loss.detach().cpu()))
 
         scheduler.step()
@@ -300,24 +291,22 @@ def train_model(config: dict) -> Path:
         history_row = {
             "epoch": epoch,
             "train_loss": float(np.mean(epoch_losses)),
-            "train_quantile_loss": float(np.mean(epoch_q_losses)),
+            "train_regression_loss": float(np.mean(epoch_reg_losses)),
             "train_motion_loss": float(np.mean(epoch_motion_losses)),
             "val_mae_w": float(val_metrics["mae"]),
             "val_rmse_w": float(val_metrics["rmse"]),
-            "val_pinball": float(val_metrics["pinball_loss"]),
             "lr": float(scheduler.get_last_lr()[0]),
         }
         history.append(history_row)
         logger.info(
-            "Epoch %d train_loss=%.5f val_rmse=%.2f val_pinball=%.5f",
+            "Epoch %d train_loss=%.5f val_rmse=%.2f",
             epoch,
             history_row["train_loss"],
             history_row["val_rmse_w"],
-            history_row["val_pinball"],
         )
 
-        if val_metrics["pinball_loss"] < best_val:
-            best_val = val_metrics["pinball_loss"]
+        if val_metrics["rmse"] < best_val:
+            best_val = val_metrics["rmse"]
             no_improve = 0
             torch.save(model.state_dict(), run_dir / "best_model.pt")
         else:

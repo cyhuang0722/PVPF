@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 
 
-class QuantileForecastHead(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, dropout: float, out_dim: int = 3):
+class DeterministicForecastHead(nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int, dropout: float, out_dim: int = 1):
         super().__init__()
-        if out_dim != 3:
-            raise ValueError("QuantileForecastHead expects exactly 3 quantile outputs (q10/q50/q90).")
+        if out_dim != 1:
+            raise ValueError("DeterministicForecastHead expects exactly one output.")
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.GELU(),
@@ -19,10 +19,4 @@ class QuantileForecastHead(nn.Module):
         )
 
     def forward(self, fused: torch.Tensor) -> torch.Tensor:
-        raw = self.net(fused)
-        q50 = torch.sigmoid(raw[:, 0:1])
-        lower_frac = torch.sigmoid(raw[:, 1:2])
-        upper_frac = torch.sigmoid(raw[:, 2:3])
-        q10 = q50 * (1.0 - lower_frac)
-        q90 = q50 + (1.0 - q50) * upper_frac
-        return torch.cat([q10, q50, q90], dim=1)
+        return torch.sigmoid(self.net(fused))

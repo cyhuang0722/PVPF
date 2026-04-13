@@ -73,15 +73,10 @@
     "dropout": 0.1
   },
   "loss": {
-    "quantiles": [
-      0.1,
-      0.5,
-      0.9
-    ],
+    "regression": "mse",
     "motion_loss_weight": 0.2,
     "warp_weight": 1.0,
-    "smooth_weight": 0.05,
-    "quantile_crossing_weight": 0.01
+    "smooth_weight": 0.05
   },
   "train": {
     "artifact_root": "/Users/huangchouyue/Projects/PVPF/new-model/artifacts/runs",
