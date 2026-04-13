@@ -3,6 +3,7 @@
 这个目录现在用于和 `new-model` 做基础模型对标，默认直接复用 `new-model` 生成的样本清单，因此以下几项已经对齐：
 
 - 输入序列：直接读取样本 CSV 里的 `img_paths`，与 `new-model` 完全一致
+- 历史 PV：直接读取样本 CSV 里的 `past_pv_w`，并在模型里作为额外分支参与融合
 - 数据切分：直接读取同一份样本 CSV 里的 `split=train/val/test`
 - 目标归一化：默认使用 `clear sky index`
 - 结果统计：按和 `new-model` 一致的口径导出 `predictions_{train,val,test}.csv` 与 `metrics_{train,val,test}.json`
@@ -26,6 +27,7 @@ python /Users/huangchouyue/Projects/PVPF/new-model/scripts/prepare_dataset.py \
 这份文件里包含：
 
 - `img_paths`
+- `past_pv_w`
 - `target_value`
 - `target_pv_w`
 - `target_clear_sky_w`
@@ -101,6 +103,7 @@ python /Users/huangchouyue/Projects/PVPF/pv_forecasting/ConvLSTM-encoder/train.p
 
 - `ts_anchor`
 - `ts_target`
+- `past_pv_w`
 - `target_value`
 - `target_pv_w`
 - `target_clear_sky_w`

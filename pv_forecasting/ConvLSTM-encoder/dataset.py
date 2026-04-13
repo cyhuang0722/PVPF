@@ -211,6 +211,8 @@ class PreprocessedConvLSTMDataset(Dataset):
                 raise ValueError("samples csv must include target_pv_w or pv_target_w")
         if "target_clear_sky_w" not in self.df.columns:
             self.df["target_clear_sky_w"] = np.ones(len(self.df), dtype=np.float32)
+        if "past_pv_w" not in self.df.columns:
+            raise ValueError("samples csv missing required column: past_pv_w")
         self.df = self.df.reset_index(drop=True)
 
     def _rewrite_path(self, path: str) -> str:
@@ -251,8 +253,21 @@ class PreprocessedConvLSTMDataset(Dataset):
         target_value = np.float32(row["target_value"])
         target_pv_w = np.float32(row["target_pv_w"])
         target_clear_sky_w = np.float32(row["target_clear_sky_w"])
+        past_pv_raw = row["past_pv_w"]
+        if isinstance(past_pv_raw, str):
+            try:
+                past_pv = json.loads(past_pv_raw)
+            except json.JSONDecodeError:
+                past_pv = ast.literal_eval(past_pv_raw)
+        else:
+            past_pv = list(past_pv_raw)
+        past_pv_w = np.asarray(past_pv, dtype=np.float32)
+        denom = max(float(target_clear_sky_w), 1e-6)
+        past_pv_csi = np.clip(past_pv_w / denom, a_min=0.0, a_max=1.0)
         return {
             "x_seq": torch.from_numpy(x),
+            "pv_history": torch.tensor(past_pv_csi, dtype=torch.float32),
+            "pv_history_w": torch.tensor(past_pv_w, dtype=torch.float32),
             "target": torch.tensor(target_value),
             "target_pv_w": torch.tensor(target_pv_w),
             "target_clear_sky_w": torch.tensor(target_clear_sky_w),

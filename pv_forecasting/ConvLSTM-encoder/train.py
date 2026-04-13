@@ -85,10 +85,11 @@ def run_epoch(
     loss_sum = 0.0
     for batch in loader:
         x = batch["x_seq"].to(device)
+        pv_history = batch["pv_history"].to(device)
         y = batch["target"].to(device)
         if is_train:
             optimizer.zero_grad()
-        pred = model(x)
+        pred = model(x, pv_history)
         loss = criterion(pred, y)
         if is_train:
             loss.backward()
@@ -109,10 +110,12 @@ def predict(
     with torch.no_grad():
         for batch in DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0):
             x = batch["x_seq"].to(device)
-            pred_raw = model(x).cpu().numpy().reshape(-1)
+            pv_history = batch["pv_history"].to(device)
+            pred_raw = model(x, pv_history).cpu().numpy().reshape(-1)
             target_value = batch["target"].cpu().numpy().reshape(-1)
             target_pv_w = batch["target_pv_w"].cpu().numpy().reshape(-1)
             clear_sky_w = batch["target_clear_sky_w"].cpu().numpy().reshape(-1)
+            pv_history_w = batch["pv_history_w"].cpu().numpy()
             meta_index = batch["meta_index"].cpu().numpy().reshape(-1)
 
             pred_value = np.clip(pred_raw, a_min=0.0, a_max=1.0 if use_clear_sky_index else None)
@@ -127,6 +130,7 @@ def predict(
                         "target_value": float(target_value[i]),
                         "target_pv_w": float(target_pv_w[i]),
                         "target_clear_sky_w": float(clear_sky_w[i]),
+                        "past_pv_w": json.dumps(pv_history_w[i].tolist(), ensure_ascii=False),
                         "pred_value": float(pred_value[i]),
                         "pred_value_raw": float(pred_raw[i]),
                         "pred_w": float(pred_w[i]),
@@ -154,6 +158,8 @@ def main() -> None:
     parser.add_argument("--img-channels", type=int, choices=[1, 3], default=1)
     parser.add_argument("--hidden-channels", type=int, default=32)
     parser.add_argument("--kernel-size", type=int, default=3)
+    parser.add_argument("--pv-history-dim", type=int, default=4)
+    parser.add_argument("--pv-hidden", type=int, default=32)
     parser.add_argument("--fc-hidden", type=int, default=128)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--max-time-diff-sec", type=int, default=90)
@@ -236,6 +242,8 @@ def main() -> None:
         in_channels=args.img_channels,
         hidden_channels=args.hidden_channels,
         kernel_size=args.kernel_size,
+        pv_history_dim=args.pv_history_dim,
+        pv_hidden=args.pv_hidden,
         fc_hidden=args.fc_hidden,
         dropout=args.dropout,
     ).to(device)
@@ -260,6 +268,8 @@ def main() -> None:
             "MODEL_CFG": {
                 "hidden_channels": args.hidden_channels,
                 "kernel_size": args.kernel_size,
+                "pv_history_dim": args.pv_history_dim,
+                "pv_hidden": args.pv_hidden,
                 "fc_hidden": args.fc_hidden,
                 "dropout": args.dropout,
             },
@@ -274,11 +284,13 @@ def main() -> None:
     if args.dry_run:
         sample_batch = next(iter(val_loader))
         x = sample_batch["x_seq"].to(device)
+        pv_history = sample_batch["pv_history"].to(device)
         with torch.no_grad():
-            pred = model(x)
+            pred = model(x, pv_history)
         logging.info(
-            "Dry run succeeded. Batch x=%s pred=%s",
+            "Dry run succeeded. Batch x=%s pv_history=%s pred=%s",
             tuple(sample_batch["x_seq"].shape),
+            tuple(sample_batch["pv_history"].shape),
             tuple(pred.shape),
         )
         return

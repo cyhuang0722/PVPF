@@ -55,6 +55,8 @@ class ConvLSTMPVRegressor(nn.Module):
         in_channels: int = 1,
         hidden_channels: int = 32,
         kernel_size: int = 3,
+        pv_history_dim: int = 4,
+        pv_hidden: int = 32,
         fc_hidden: int = 128,
         dropout: float = 0.2,
     ):
@@ -65,16 +67,23 @@ class ConvLSTMPVRegressor(nn.Module):
             kernel_size=kernel_size,
         )
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.pv_head = nn.Sequential(
+            nn.Linear(pv_history_dim, pv_hidden),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
         self.head = nn.Sequential(
-            nn.Flatten(start_dim=1),
-            nn.Linear(hidden_channels, fc_hidden),
+            nn.Linear(hidden_channels + pv_hidden, fc_hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(fc_hidden, 1),
         )
 
-    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_seq: torch.Tensor, pv_history: torch.Tensor) -> torch.Tensor:
         feat_map = self.encoder(x_seq)
         pooled = self.pool(feat_map)
-        out = self.head(pooled)
+        image_feat = torch.flatten(pooled, start_dim=1)
+        pv_feat = self.pv_head(pv_history)
+        fused = torch.cat([image_feat, pv_feat], dim=1)
+        out = self.head(fused)
         return out.squeeze(1)
