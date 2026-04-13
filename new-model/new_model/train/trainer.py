@@ -10,11 +10,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..data.dataset import SunConditionedPVDataset
+from ..losses.flow import masked_direction_loss, masked_smooth_l1_loss
 from ..losses.motion import motion_regularization_loss
 from ..models.full_model import MinimalSunConditionedPVModel
 from ..utils.io import ensure_dir, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
-from ..viz.motion import save_motion_attention_figure
+from ..viz.motion import save_motion_attention_figure, save_motion_flow_comparison_figure
 from .metrics import regression_metrics
 
 
@@ -62,17 +63,19 @@ def _visual_category_counts(train_cfg: dict) -> dict[str, int]:
     configured = train_cfg.get("visualization_category_counts")
     if isinstance(configured, dict):
         counts = {
+            "best": int(configured.get("best", 0)),
             "largest_error": int(configured.get("largest_error", 0)),
             "representative": int(configured.get("representative", 0)),
             "midday": int(configured.get("midday", 0)),
         }
     else:
-        total = int(train_cfg.get("save_top_k_visualizations", 6))
-        base = total // 3
-        remainder = total % 3
+        total = int(train_cfg.get("save_top_k_visualizations", 8))
+        base = total // 4
+        remainder = total % 4
         counts = {
-            "largest_error": base + (1 if remainder > 0 else 0),
-            "representative": base + (1 if remainder > 1 else 0),
+            "best": base + (1 if remainder > 0 else 0),
+            "largest_error": base + (1 if remainder > 1 else 0),
+            "representative": base + (1 if remainder > 2 else 0),
             "midday": base,
         }
     return counts
@@ -97,6 +100,7 @@ def _select_visual_samples(pred_df: pd.DataFrame, train_cfg: dict) -> list[dict[
     work_df["representative_gap"] = (work_df["abs_error_w"] - median_abs_error).abs()
 
     ranked_frames = {
+        "best": work_df.sort_values(["abs_error_w", "ts_target"], ascending=[True, True]),
         "largest_error": work_df.sort_values(["abs_error_w", "ts_target"], ascending=[False, True]),
         "representative": work_df.sort_values(["representative_gap", "seconds_to_noon", "ts_target"]),
         "midday": work_df.sort_values(["seconds_to_noon", "abs_error_w", "ts_target"]),
@@ -105,7 +109,7 @@ def _select_visual_samples(pred_df: pd.DataFrame, train_cfg: dict) -> list[dict[
     chosen: list[dict[str, int | str]] = []
     used_indices: set[int] = set()
 
-    for category in ("largest_error", "representative", "midday"):
+    for category in ("best", "largest_error", "representative", "midday"):
         remaining = counts.get(category, 0)
         if remaining <= 0:
             continue
@@ -149,13 +153,23 @@ def _build_visual_item(
             batch[key] = value
 
     with torch.no_grad():
-        out = model(batch["images"], batch["pv_history"], batch["solar_vec"])
+        out = model(
+            batch["images"],
+            batch["pv_history"],
+            batch["solar_vec"],
+            sun_xy=batch["sun_xy"],
+            sun_angles=batch["sun_angles"],
+        )
 
     frame = dataset.df.iloc[sample_index]
     return {
+        "images": batch["images"][0].detach().cpu().numpy(),
         "image": batch["images"][0, -1].detach().cpu().numpy(),
         "motion": out["motion_fields"][0, -1].detach().cpu().numpy(),
+        "flow_gt": batch["flow_gt"][0, -1].detach().cpu().numpy(),
+        "flow_mask": batch["flow_mask"][0, -1].detach().cpu().numpy(),
         "attention": out["attention_map"][0].detach().cpu().numpy(),
+        "sun_prior": out["sun_prior"][0, 0].detach().cpu().numpy(),
         "title": str(frame["ts_target"]),
     }
 
@@ -179,7 +193,13 @@ def _evaluate_split(
     with torch.no_grad():
         for batch in loader:
             data = _to_device(batch, device)
-            out = model(data["images"], data["pv_history"], data["solar_vec"])
+            out = model(
+                data["images"],
+                data["pv_history"],
+                data["solar_vec"],
+                sun_xy=data["sun_xy"],
+                sun_angles=data["sun_angles"],
+            )
             pred = out["prediction"].squeeze(-1).cpu().numpy()
             clear_sky_w = data["target_clear_sky_w"].cpu().numpy()
             pred_w = _target_to_w(pred, clear_sky_w, use_csi)
@@ -264,6 +284,8 @@ def train_model(config: dict) -> Path:
     best_val = float("inf")
     no_improve = 0
     history: list[dict] = []
+    min_epochs = int(config["train"].get("early_stopping_min_epochs", 12))
+    early_delta = float(config["train"].get("early_stopping_min_delta", 50.0))
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
@@ -274,16 +296,31 @@ def train_model(config: dict) -> Path:
         for batch in train_loader:
             data = _to_device(batch, device)
             optimizer.zero_grad()
-            out = model(data["images"], data["pv_history"], data["solar_vec"])
+            out = model(
+                data["images"],
+                data["pv_history"],
+                data["solar_vec"],
+                sun_xy=data["sun_xy"],
+                sun_angles=data["sun_angles"],
+            )
             pred = out["prediction"].squeeze(-1)
             reg_loss = F.mse_loss(pred, data["target"])
-            motion_loss, motion_stats = motion_regularization_loss(
-                out["frame_features"],
-                out["motion_fields"],
-                warp_weight=float(config["loss"]["warp_weight"]),
-                smooth_weight=float(config["loss"]["smooth_weight"]),
-            )
-            total = reg_loss + float(config["loss"]["motion_loss_weight"]) * motion_loss
+            arch = config["model"].get("architecture", "minimal_sun_conditioned")
+            if arch == "dual_timescale_sun_aware":
+                flow_loss = masked_smooth_l1_loss(out["flow_pred"], data["flow_gt"], data["flow_mask"])
+                dir_loss = masked_direction_loss(out["flow_pred"], data["flow_gt"], data["flow_mask"])
+                motion_loss = flow_loss + float(config["loss"].get("direction_loss_weight", 0.1)) * dir_loss
+                total = reg_loss
+                if bool(config["loss"].get("enable_flow_aux", True)):
+                    total = total + float(config["loss"].get("flow_loss_weight", 0.05)) * motion_loss
+            else:
+                motion_loss, motion_stats = motion_regularization_loss(
+                    out["frame_features"],
+                    out["motion_fields"],
+                    warp_weight=float(config["loss"]["warp_weight"]),
+                    smooth_weight=float(config["loss"]["smooth_weight"]),
+                )
+                total = reg_loss + float(config["loss"]["motion_loss_weight"]) * motion_loss
             total.backward()
             optimizer.step()
 
@@ -311,13 +348,14 @@ def train_model(config: dict) -> Path:
             history_row["val_rmse_w"],
         )
 
-        if val_metrics["rmse"] < best_val:
+        improved = val_metrics["rmse"] < (best_val - early_delta)
+        if improved:
             best_val = val_metrics["rmse"]
             no_improve = 0
             torch.save(model.state_dict(), run_dir / "best_model.pt")
         else:
             no_improve += 1
-            if no_improve >= int(config["train"]["early_stopping_patience"]):
+            if epoch >= min_epochs and no_improve >= int(config["train"]["early_stopping_patience"]):
                 logger.info("Early stopping triggered at epoch %d", epoch)
                 break
 
@@ -345,6 +383,19 @@ def train_model(config: dict) -> Path:
                 out_path=run_dir
                 / "figures"
                 / f"motion_attention_{split_name}_{idx:02d}_{selection['category']}.png",
+                title=f"{item['title']} | {selection['category']}",
+            )
+            save_motion_flow_comparison_figure(
+                image_current=item["images"][-1],
+                image_prev_1=item["images"][-2],
+                image_prev_2=item["images"][-3],
+                flow_pred_recent=item["motion"],
+                flow_gt_recent=item["flow_gt"],
+                flow_mask_recent=item["flow_mask"],
+                sun_prior=item["sun_prior"],
+                out_path=run_dir
+                / "figures"
+                / f"motion_flow_compare_{split_name}_{idx:02d}_{selection['category']}.png",
                 title=f"{item['title']} | {selection['category']}",
             )
 

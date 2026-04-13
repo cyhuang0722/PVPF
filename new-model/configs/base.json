@@ -54,12 +54,14 @@
     "sun_projection_f_px_per_rad": 71.274
   },
   "model": {
+    "architecture": "dual_timescale_sun_aware",
     "frame_channels": [
       32,
       64,
       96,
       128
     ],
+    "motion_input_channels": 15,
     "motion_hidden": [
       128,
       64,
@@ -67,13 +69,19 @@
     ],
     "motion_feature_dim": 64,
     "attention_dim": 128,
+    "sun_hidden_dim": 64,
     "pv_hidden_dim": 64,
     "fusion_hidden_dim": 128,
     "max_motion_displacement": 2.5,
-    "dropout": 0.1
+    "dropout": 0.1,
+    "max_target_value": 1.2,
+    "sun_gaussian_sigma": 2.0
   },
   "loss": {
     "regression": "mse",
+    "enable_flow_aux": true,
+    "flow_loss_weight": 0.05,
+    "direction_loss_weight": 0.1,
     "motion_loss_weight": 0.2,
     "warp_weight": 1.0,
     "smooth_weight": 0.05
@@ -81,16 +89,19 @@
   "train": {
     "artifact_root": "/Users/huangchouyue/Projects/PVPF/new-model/artifacts/runs",
     "batch_size": 8,
-    "epochs": 20,
+    "epochs": 50,
     "learning_rate": 0.0001,
     "weight_decay": 0.0001,
     "num_workers": 0,
-    "early_stopping_patience": 6,
-    "save_top_k_visualizations": 6,
+    "early_stopping_patience": 8,
+    "early_stopping_min_epochs": 12,
+    "early_stopping_min_delta": 50.0,
+    "save_top_k_visualizations": 16,
     "visualization_category_counts": {
-      "largest_error": 2,
-      "representative": 2,
-      "midday": 2
+      "best": 4,
+      "largest_error": 4,
+      "representative": 4,
+      "midday": 4
     }
   }
 }

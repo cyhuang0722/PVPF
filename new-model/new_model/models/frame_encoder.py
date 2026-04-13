@@ -36,4 +36,3 @@ class FrameEncoder(nn.Module):
         x = self.stage3(x)
         x = self.stage4(x)
         return self.proj(x)
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from .dual_timescale import DualTimescaleSunAwarePVModel
 from .forecast_head import DeterministicForecastHead
 from .frame_encoder import FrameEncoder
 from .motion_aggregator import MotionAggregator
@@ -14,6 +15,11 @@ from .sun_attention import SunConditionedAttention
 class MinimalSunConditionedPVModel(nn.Module):
     def __init__(self, model_cfg: dict):
         super().__init__()
+        if model_cfg.get("architecture", "minimal_sun_conditioned") == "dual_timescale_sun_aware":
+            self.impl = DualTimescaleSunAwarePVModel(model_cfg)
+            self.is_dual_timescale = True
+            return
+        self.is_dual_timescale = False
         channels = model_cfg["frame_channels"]
         feature_dim = channels[-1]
         motion_feature_dim = model_cfg["motion_feature_dim"]
@@ -39,7 +45,18 @@ class MinimalSunConditionedPVModel(nn.Module):
             out_dim=1,
         )
 
-    def forward(self, images: torch.Tensor, pv_history: torch.Tensor, solar_vec: torch.Tensor) -> dict:
+    def forward(
+        self,
+        images: torch.Tensor,
+        pv_history: torch.Tensor,
+        solar_vec: torch.Tensor,
+        sun_xy: torch.Tensor | None = None,
+        sun_angles: torch.Tensor | None = None,
+    ) -> dict:
+        if getattr(self, "is_dual_timescale", False):
+            if sun_xy is None or sun_angles is None:
+                raise ValueError("Dual-timescale architecture requires sun_xy and sun_angles inputs.")
+            return self.impl(images, pv_history, sun_angles=sun_angles, sun_xy=sun_xy)
         bsz, seq_len, ch, h, w = images.shape
         feats = self.frame_encoder(images.view(bsz * seq_len, ch, h, w))
         _, feat_ch, feat_h, feat_w = feats.shape
