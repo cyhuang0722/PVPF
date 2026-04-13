@@ -41,7 +41,7 @@ def main() -> None:
     model = MinimalSunConditionedPVModel(config["model"]).to(device)
     model.load_state_dict(torch.load(run_dir / "best_model.pt", map_location=device))
 
-    pred_df, metrics, _ = _evaluate_split(model, dataset, config, device)
+    pred_df, metrics = _evaluate_split(model, dataset, config, device)
     out_csv = run_dir / f"infer_{args.split}.csv"
     pred_df.to_csv(out_csv, index=False)
     print(json.dumps({"out_csv": str(out_csv), "metrics": metrics}, indent=2, ensure_ascii=False))

@@ -151,6 +151,9 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
     past_pv_offsets = data_cfg["past_pv_offsets_min"]
     target_offset = int(data_cfg["target_offset_min"])
     tolerance_sec = float(data_cfg["image_match_tolerance_sec"])
+    sample_hour_start = int(data_cfg.get("sample_hour_start", 8))
+    sample_hour_end = int(data_cfg.get("sample_hour_end", 17))
+    drop_zero_input_samples = bool(data_cfg.get("drop_zero_input_samples", True))
 
     camera_df = load_camera_index(
         Path(data_cfg["camera_dir"]),
@@ -196,12 +199,21 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
 
     for anchor_ts in target_times:
         target_ts = anchor_ts + pd.Timedelta(minutes=target_offset)
+        target_hour = target_ts.hour + target_ts.minute / 60.0 + target_ts.second / 3600.0
+        if not (sample_hour_start <= target_hour <= sample_hour_end):
+            continue
         required_pv_times = [anchor_ts + pd.Timedelta(minutes=o) for o in past_pv_offsets] + [target_ts]
         if not all(ts in pv_series.index for ts in required_pv_times):
             missing_pv += 1
             continue
         pv_values = pv_series.loc[required_pv_times].to_numpy(dtype=np.float32)
         if not np.all(np.isfinite(pv_values)):
+            missing_pv += 1
+            continue
+        if float(pv_values[-1]) < 0.0:
+            missing_pv += 1
+            continue
+        if drop_zero_input_samples and np.any(pv_values[:-1] <= 0.0):
             missing_pv += 1
             continue
 
@@ -319,6 +331,9 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "n_filtered_sun_edge": summary.n_filtered_sun_edge,
             "image_size": list(summary.image_size),
             "source_image_size": list(summary.source_image_size),
+            "sample_hour_start": int(config["data"].get("sample_hour_start", 8)),
+            "sample_hour_end": int(config["data"].get("sample_hour_end", 17)),
+            "drop_zero_input_samples": bool(config["data"].get("drop_zero_input_samples", True)),
             "samples_csv": str(samples_csv),
         },
     )

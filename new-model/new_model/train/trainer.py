@@ -51,8 +51,10 @@ def _to_device(batch: dict, device: torch.device) -> dict:
 
 def _target_to_w(quantiles: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_index: bool) -> np.ndarray:
     if use_clear_sky_index:
-        return quantiles * clear_sky_w[:, None]
-    return quantiles
+        values_w = quantiles * clear_sky_w[:, None]
+    else:
+        values_w = quantiles
+    return np.clip(values_w, a_min=0.0, a_max=None)
 
 
 def _visual_category_counts(train_cfg: dict) -> dict[str, int]:
