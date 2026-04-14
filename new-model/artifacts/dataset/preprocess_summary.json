@@ -1,8 +1,8 @@
 {
-  "n_images_indexed": 53957,
-  "n_pv_rows": 7104,
-  "n_candidate_targets": 7104,
-  "n_samples": 2699,
+  "n_images_indexed": 62530,
+  "n_pv_rows": 8160,
+  "n_candidate_targets": 8160,
+  "n_samples": 3106,
   "n_missing_image": 14,
   "n_missing_pv": 25,
   "n_filtered_sun_edge": 0,

@@ -156,6 +156,8 @@ class SunConditionedPVDataset(Dataset):
         return pairs
 
     def _get_nearest_path(self, desired_ts: pd.Timestamp) -> str | None:
+        if getattr(desired_ts, "tzinfo", None) is not None:
+            desired_ts = desired_ts.tz_localize(None)
         desired_ns = desired_ts.value
         pos = int(np.searchsorted(self.camera_ts_ns, desired_ns))
         candidate_idx: list[int] = []

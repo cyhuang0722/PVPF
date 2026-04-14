@@ -1,2 +1,1 @@
-"""Minimal sun-conditioned probabilistic PV forecasting package."""
-
+"""Sun-Conditioned Stochastic Cloud State Network package."""
