@@ -32,6 +32,16 @@
     ],
     "target_offset_min": 15,
     "image_match_tolerance_sec": 75,
+    "motion_teacher_pairs_min": [
+      [-5, -4],
+      [-3, -2],
+      [-1, 0]
+    ],
+    "teacher_flow_resolution": 64,
+    "teacher_max_displacement_px": 2,
+    "teacher_conf_threshold": 0.25,
+    "teacher_min_patch_vectors": 6,
+    "teacher_min_magnitude": 0.15,
     "sample_hour_start": 8,
     "sample_hour_end": 17,
     "drop_zero_input_samples": true,
@@ -62,6 +72,7 @@
       128
     ],
     "motion_input_channels": 15,
+    "patch_grid_size": 8,
     "motion_hidden": [
       128,
       64,
@@ -75,13 +86,14 @@
     "max_motion_displacement": 2.5,
     "dropout": 0.1,
     "max_target_value": 1.2,
-    "sun_gaussian_sigma": 2.0
+    "sun_spot_sigma": 4.0,
+    "sun_corridor_width": 3.0,
+    "sun_corridor_length": 10.0
   },
   "loss": {
     "regression": "mse",
-    "enable_flow_aux": true,
-    "flow_loss_weight": 0.05,
-    "direction_loss_weight": 0.1,
+    "enable_motion_supervision": true,
+    "motion_supervision_weight": 0.05,
     "motion_loss_weight": 0.2,
     "warp_weight": 1.0,
     "smooth_weight": 0.05

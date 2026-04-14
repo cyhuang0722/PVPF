@@ -19,3 +19,14 @@ def masked_direction_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.
     loss = (1.0 - cosine) * mask.squeeze(2)
     denom = mask.sum().clamp_min(1.0)
     return loss.sum() / denom
+
+
+def masked_patch_cosine_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    dot = (pred * target).sum(dim=-1)
+    pred_norm = torch.linalg.norm(pred, dim=-1)
+    target_norm = torch.linalg.norm(target, dim=-1)
+    cosine = dot / (pred_norm * target_norm + eps)
+    valid = mask.squeeze(-1)
+    loss = (1.0 - cosine) * valid
+    denom = valid.sum().clamp_min(1.0)
+    return loss.sum() / denom

@@ -20,14 +20,14 @@ import plotly.graph_objects as go
 
 BASE_DIR = Path(__file__).resolve().parent
 # CSV_PATH = BASE_DIR / "pv_only" / "model_output" / "run_20260408-092225_pv_only" / "predictions_val.csv"
-CSV_PATH = Path("/Users/huangchouyue/Projects/PVPF/new-model/artifacts/runs/run_20260413-170933/predictions_test.csv")
-
+# CSV_PATH = Path("/Users/huangchouyue/Projects/PVPF/new-model/artifacts/runs/run_20260413-170933/predictions_test.csv")
+CSV_PATH = Path("/Users/huangchouyue/Projects/PVPF/SPM/run_20260413-235432_spm/predictions_train.csv")
 start_time = "2025-03-01 00:00:00"
 end_time = "2027-04-01 23:59:59"
-pred_col_idx = 7
+pred_col_idx = 10
 true_col_idx = 3
 time_col = "ts_pred"
-out_html = CSV_PATH.parent / "forecast_plot_test.html"
+out_html = CSV_PATH.parent / "forecast_plot_train.html"
 
 
 def align_bound_to_series_tz(bound: pd.Timestamp, ts_series: pd.Series) -> pd.Timestamp:

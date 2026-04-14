@@ -126,3 +126,86 @@ def save_motion_flow_comparison_figure(
     fig.tight_layout()
     fig.savefig(out_path, dpi=160)
     plt.close(fig)
+
+
+def save_patch_motion_comparison_figure(
+    image_current: np.ndarray,
+    image_prev_1: np.ndarray,
+    image_prev_2: np.ndarray,
+    patch_motion_pred: np.ndarray,
+    patch_motion_teacher: np.ndarray,
+    patch_motion_mask: np.ndarray,
+    sun_prior: np.ndarray,
+    out_path: str | Path,
+    title: str,
+) -> None:
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _to_rgb(img: np.ndarray) -> np.ndarray:
+        if img.shape[0] == 1:
+            return np.repeat(np.transpose(img, (1, 2, 0)), 3, axis=2)
+        return np.transpose(img, (1, 2, 0))
+
+    def _resize_overlay(field: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+        h, w = target_hw
+        scale_y = max(int(np.ceil(h / field.shape[0])), 1)
+        scale_x = max(int(np.ceil(w / field.shape[1])), 1)
+        return np.kron(field, np.ones((scale_y, scale_x), dtype=np.float32))[:h, :w]
+
+    cur_rgb = _to_rgb(image_current)
+    prev1_rgb = _to_rgb(image_prev_1)
+    prev2_rgb = _to_rgb(image_prev_2)
+    img_h, img_w = cur_rgb.shape[:2]
+    grid = int(np.sqrt(patch_motion_pred.shape[0]))
+    step_x = img_w / grid
+    step_y = img_h / grid
+    center_x = (np.arange(grid) + 0.5) * step_x
+    center_y = (np.arange(grid) + 0.5) * step_y
+    xx, yy = np.meshgrid(center_x, center_y)
+
+    pred = patch_motion_pred.reshape(grid, grid, 2)
+    teacher = patch_motion_teacher.reshape(grid, grid, 2)
+    mask = patch_motion_mask.reshape(grid, grid)
+    prior = _resize_overlay(sun_prior, (img_h, img_w))
+
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    axes[0, 0].imshow(prev2_rgb)
+    axes[0, 0].set_title("t-4 Frame")
+    axes[0, 0].axis("off")
+    axes[0, 1].imshow(prev1_rgb)
+    axes[0, 1].set_title("t-2 Frame")
+    axes[0, 1].axis("off")
+    axes[0, 2].imshow(cur_rgb)
+    axes[0, 2].set_title("t Frame")
+    axes[0, 2].axis("off")
+    axes[0, 3].imshow(cur_rgb)
+    axes[0, 3].imshow(prior, cmap="jet", alpha=0.35)
+    axes[0, 3].set_title("Sun Prior")
+    axes[0, 3].axis("off")
+
+    axes[1, 0].imshow(cur_rgb)
+    axes[1, 0].quiver(xx, yy, pred[..., 0], pred[..., 1], color="lime", scale=18)
+    axes[1, 0].set_title("Pred Patch Motion")
+    axes[1, 0].axis("off")
+
+    axes[1, 1].imshow(cur_rgb)
+    axes[1, 1].quiver(xx, yy, teacher[..., 0], teacher[..., 1], color="cyan", scale=18)
+    axes[1, 1].set_title("Teacher Patch Motion")
+    axes[1, 1].axis("off")
+
+    axes[1, 2].imshow(mask, cmap="gray")
+    axes[1, 2].set_title("Patch Valid Mask")
+    axes[1, 2].axis("off")
+
+    cosine = np.sum(pred * teacher, axis=-1)
+    cosine = np.where(mask > 0.5, cosine, np.nan)
+    im = axes[1, 3].imshow(cosine, cmap="coolwarm", vmin=-1.0, vmax=1.0)
+    axes[1, 3].set_title("Patch Cosine Similarity")
+    axes[1, 3].axis("off")
+    fig.colorbar(im, ax=axes[1, 3], fraction=0.046, pad=0.04)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)

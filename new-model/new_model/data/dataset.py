@@ -33,6 +33,15 @@ class SunConditionedPVDataset(Dataset):
         image_size: tuple[int, int],
         sky_mask_path: str | Path | None = None,
         peak_power_w: float | None = None,
+        camera_index_csv: str | Path | None = None,
+        image_match_tolerance_sec: int = 75,
+        motion_teacher_pairs_min: list[list[int]] | None = None,
+        patch_grid_size: int = 8,
+        teacher_flow_resolution: int = 64,
+        teacher_max_displacement_px: int = 2,
+        teacher_conf_threshold: float = 0.25,
+        teacher_min_patch_vectors: int = 6,
+        teacher_min_magnitude: float = 0.15,
     ) -> None:
         self.df = pd.read_csv(csv_path)
         self.df["ts_anchor"] = pd.to_datetime(self.df["ts_anchor"])
@@ -41,10 +50,24 @@ class SunConditionedPVDataset(Dataset):
         self.image_size = image_size
         self.mask = load_mask(sky_mask_path, image_size) if sky_mask_path and Path(sky_mask_path).exists() else None
         self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
-        self.flow_size = (
-            max(1, image_size[0] // 8),
-            max(1, image_size[1] // 8),
-        )
+        self.image_match_tolerance_sec = int(image_match_tolerance_sec)
+        self.motion_teacher_pairs_min = motion_teacher_pairs_min or [[-5, -4], [-3, -2], [-1, 0]]
+        self.patch_grid_size = int(patch_grid_size)
+        self.teacher_flow_resolution = int(teacher_flow_resolution)
+        self.teacher_flow_size = (self.teacher_flow_resolution, self.teacher_flow_resolution)
+        self.teacher_max_displacement_px = int(teacher_max_displacement_px)
+        self.teacher_conf_threshold = float(teacher_conf_threshold)
+        self.teacher_min_patch_vectors = int(teacher_min_patch_vectors)
+        self.teacher_min_magnitude = float(teacher_min_magnitude)
+        self.camera_index_csv = Path(camera_index_csv) if camera_index_csv else None
+        self.camera_ts_ns = None
+        self.camera_paths = None
+        if self.camera_index_csv is not None and self.camera_index_csv.exists():
+            camera_df = pd.read_csv(self.camera_index_csv)
+            camera_df["timestamp"] = pd.to_datetime(camera_df["timestamp"], errors="coerce")
+            camera_df = camera_df.dropna(subset=["timestamp", "file_path"]).sort_values("timestamp").reset_index(drop=True)
+            self.camera_ts_ns = camera_df["timestamp"].astype("int64").to_numpy()
+            self.camera_paths = camera_df["file_path"].astype(str).to_numpy()
         if self.peak_power_w <= 0:
             raise ValueError("peak_power_w must be positive.")
 
@@ -73,7 +96,11 @@ class SunConditionedPVDataset(Dataset):
         azimuth_rad = np.deg2rad(float(row["azimuth_deg"]))
         elevation_rad = np.deg2rad(90.0 - float(row["zenith_deg"]))
         sun_angles = np.asarray([azimuth_rad / np.pi, elevation_rad / (0.5 * np.pi)], dtype=np.float32)
-        flow_gt, flow_mask = self._build_pseudo_flow(frames, np.asarray([float(row["sun_x_px"]), float(row["sun_y_px"])], dtype=np.float32))
+        patch_motion_teacher, patch_motion_mask = self._build_patch_motion_teacher(
+            anchor_ts=row["ts_anchor"],
+            fallback_frames=frames[-3:],
+            sun_xy=np.asarray([float(row["sun_x_px"]), float(row["sun_y_px"])], dtype=np.float32),
+        )
 
         return {
             "images": torch.from_numpy(frames.astype(np.float32)),
@@ -84,34 +111,76 @@ class SunConditionedPVDataset(Dataset):
             "target_pv_w": torch.tensor(float(row["target_pv_w"]), dtype=torch.float32),
             "target_clear_sky_w": torch.tensor(float(row["target_clear_sky_w"]), dtype=torch.float32),
             "sun_xy": torch.tensor([float(row["sun_x_px"]), float(row["sun_y_px"])], dtype=torch.float32),
-            "flow_gt": torch.from_numpy(flow_gt),
-            "flow_mask": torch.from_numpy(flow_mask),
+            "patch_motion_teacher": torch.from_numpy(patch_motion_teacher),
+            "patch_motion_mask": torch.from_numpy(patch_motion_mask),
             "meta_index": torch.tensor(index, dtype=torch.long),
         }
 
     def dataframe(self) -> pd.DataFrame:
         return self.df.copy()
 
-    def _build_pseudo_flow(self, frames: np.ndarray, sun_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        motion_frames = torch.from_numpy(frames[-3:].astype(np.float32))
-        gray = motion_frames.mean(dim=1)
-        gray = F.interpolate(gray.unsqueeze(1), size=self.flow_size, mode="bilinear", align_corners=False).squeeze(1)
-
+    def _build_patch_motion_teacher(
+        self,
+        anchor_ts: pd.Timestamp,
+        fallback_frames: np.ndarray,
+        sun_xy: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        teacher_pairs = self._load_teacher_pairs(anchor_ts=anchor_ts, fallback_frames=fallback_frames)
         flows = []
-        masks = []
-        for idx in range(2):
-            flow, conf = self._estimate_pair_flow(gray[idx], gray[idx + 1])
-            mask = self._build_flow_mask(confidence=conf, sun_xy=sun_xy)
+        confidences = []
+        for prev_frame, curr_frame in teacher_pairs:
+            prev = self._prepare_teacher_frame(prev_frame)
+            curr = self._prepare_teacher_frame(curr_frame)
+            flow, conf = self._estimate_pair_flow(prev, curr)
             flows.append(flow)
-            masks.append(mask)
-        return np.stack(flows, axis=0), np.stack(masks, axis=0)
+            confidences.append(conf)
+        return self._aggregate_patch_teacher(
+            dense_flows=np.stack(flows, axis=0),
+            dense_conf=np.stack(confidences, axis=0),
+            sun_xy=sun_xy,
+        )
+
+    def _load_teacher_pairs(self, anchor_ts: pd.Timestamp, fallback_frames: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+        pairs: list[tuple[np.ndarray, np.ndarray]] = []
+        if self.camera_ts_ns is not None and self.camera_paths is not None:
+            for prev_offset, curr_offset in self.motion_teacher_pairs_min:
+                prev_ts = anchor_ts + pd.Timedelta(minutes=int(prev_offset))
+                curr_ts = anchor_ts + pd.Timedelta(minutes=int(curr_offset))
+                prev_path = self._get_nearest_path(prev_ts)
+                curr_path = self._get_nearest_path(curr_ts)
+                if prev_path is None or curr_path is None:
+                    continue
+                pairs.append((load_rgb_image(prev_path, self.image_size), load_rgb_image(curr_path, self.image_size)))
+        if not pairs:
+            pairs = [(fallback_frames[0], fallback_frames[1]), (fallback_frames[1], fallback_frames[2])]
+        return pairs
+
+    def _get_nearest_path(self, desired_ts: pd.Timestamp) -> str | None:
+        desired_ns = desired_ts.value
+        pos = int(np.searchsorted(self.camera_ts_ns, desired_ns))
+        candidate_idx: list[int] = []
+        if 0 <= pos < len(self.camera_ts_ns):
+            candidate_idx.append(pos)
+        if pos - 1 >= 0:
+            candidate_idx.append(pos - 1)
+        if not candidate_idx:
+            return None
+        best_i = min(candidate_idx, key=lambda i: abs(int(self.camera_ts_ns[i]) - desired_ns))
+        diff_sec = abs(int(self.camera_ts_ns[best_i]) - desired_ns) / 1e9
+        if diff_sec > self.image_match_tolerance_sec:
+            return None
+        return str(self.camera_paths[best_i])
+
+    def _prepare_teacher_frame(self, frame: np.ndarray) -> torch.Tensor:
+        gray = torch.from_numpy(frame.astype(np.float32)).mean(dim=0, keepdim=True)
+        return F.interpolate(gray.unsqueeze(0), size=self.teacher_flow_size, mode="bilinear", align_corners=False)[0, 0]
 
     def _estimate_pair_flow(self, prev: torch.Tensor, curr: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
         best_cost = None
         best_dx = torch.zeros_like(prev)
         best_dy = torch.zeros_like(prev)
-        for dy in range(-2, 3):
-            for dx in range(-2, 3):
+        for dy in range(-self.teacher_max_displacement_px, self.teacher_max_displacement_px + 1):
+            for dx in range(-self.teacher_max_displacement_px, self.teacher_max_displacement_px + 1):
                 shifted = torch.zeros_like(curr)
                 src_y0 = max(0, -dy)
                 src_y1 = min(curr.shape[0], curr.shape[0] - dy) if dy >= 0 else curr.shape[0]
@@ -137,21 +206,61 @@ class SunConditionedPVDataset(Dataset):
         flow = torch.stack([best_dx, best_dy], dim=0)
         return flow.numpy().astype(np.float32), conf.numpy().astype(np.float32)
 
-    def _build_flow_mask(self, confidence: np.ndarray, sun_xy: np.ndarray) -> np.ndarray:
-        h, w = self.flow_size
-        mask = np.ones((1, h, w), dtype=np.float32)
+    def _aggregate_patch_teacher(
+        self,
+        dense_flows: np.ndarray,
+        dense_conf: np.ndarray,
+        sun_xy: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        h, w = self.teacher_flow_size
+        dense_mask = self._build_teacher_mask(sun_xy)
+        patch_h = h // self.patch_grid_size
+        patch_w = w // self.patch_grid_size
+        patch_vectors = np.zeros((self.patch_grid_size * self.patch_grid_size, 2), dtype=np.float32)
+        patch_mask = np.zeros((self.patch_grid_size * self.patch_grid_size, 1), dtype=np.float32)
+
+        patch_idx = 0
+        for gy in range(self.patch_grid_size):
+            for gx in range(self.patch_grid_size):
+                y0 = gy * patch_h
+                y1 = h if gy == self.patch_grid_size - 1 else (gy + 1) * patch_h
+                x0 = gx * patch_w
+                x1 = w if gx == self.patch_grid_size - 1 else (gx + 1) * patch_w
+
+                local_flow = dense_flows[:, :, y0:y1, x0:x1].transpose(0, 2, 3, 1).reshape(-1, 2)
+                local_weight = (dense_conf[:, y0:y1, x0:x1] * dense_mask[y0:y1, x0:x1][None, ...]).reshape(-1)
+                valid = local_weight >= self.teacher_conf_threshold
+                if int(valid.sum()) < self.teacher_min_patch_vectors:
+                    patch_idx += 1
+                    continue
+                vecs = local_flow[valid]
+                weights = local_weight[valid]
+                mean_vec = (vecs * weights[:, None]).sum(axis=0) / max(weights.sum(), 1e-6)
+                magnitude = float(np.linalg.norm(mean_vec))
+                if magnitude < self.teacher_min_magnitude:
+                    patch_idx += 1
+                    continue
+                patch_vectors[patch_idx] = (mean_vec / max(magnitude, 1e-6)).astype(np.float32)
+                patch_mask[patch_idx, 0] = 1.0
+                patch_idx += 1
+
+        return patch_vectors, patch_mask
+
+    def _build_teacher_mask(self, sun_xy: np.ndarray) -> np.ndarray:
+        h, w = self.teacher_flow_size
+        mask = np.ones((h, w), dtype=np.float32)
         if self.mask is not None:
             mask_img = torch.from_numpy(self.mask.astype(np.float32))
-            mask = (F.interpolate(mask_img.unsqueeze(0), size=self.flow_size, mode="nearest")[0].numpy() >= 0.5).astype(np.float32)
+            mask = (F.interpolate(mask_img.unsqueeze(0), size=self.teacher_flow_size, mode="nearest")[0, 0].numpy() >= 0.5).astype(np.float32)
         scale_x = w / float(self.image_size[1])
         scale_y = h / float(self.image_size[0])
         sx = float(sun_xy[0]) * scale_x
         sy = float(sun_xy[1]) * scale_y
         yy, xx = np.meshgrid(np.arange(h, dtype=np.float32), np.arange(w, dtype=np.float32), indexing="ij")
-        sun_valid = (((xx - sx) ** 2 + (yy - sy) ** 2) >= 3.0 ** 2).astype(np.float32)
-        mask = mask * sun_valid[None, ...] * (confidence[None, ...] >= 0.25).astype(np.float32)
-        mask[:, 0, :] = 0.0
-        mask[:, -1, :] = 0.0
-        mask[:, :, 0] = 0.0
-        mask[:, :, -1] = 0.0
+        sun_valid = (((xx - sx) ** 2 + (yy - sy) ** 2) >= 4.5 ** 2).astype(np.float32)
+        mask = mask * sun_valid
+        mask[0, :] = 0.0
+        mask[-1, :] = 0.0
+        mask[:, 0] = 0.0
+        mask[:, -1] = 0.0
         return mask.astype(np.float32)

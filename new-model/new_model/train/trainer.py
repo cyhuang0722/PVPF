@@ -10,12 +10,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..data.dataset import SunConditionedPVDataset
-from ..losses.flow import masked_direction_loss, masked_smooth_l1_loss
+from ..losses.flow import masked_patch_cosine_loss
 from ..losses.motion import motion_regularization_loss
 from ..models.full_model import MinimalSunConditionedPVModel
 from ..utils.io import ensure_dir, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
-from ..viz.motion import save_motion_attention_figure, save_motion_flow_comparison_figure
+from ..viz.motion import save_motion_attention_figure, save_patch_motion_comparison_figure
 from .metrics import regression_metrics
 
 
@@ -165,9 +165,9 @@ def _build_visual_item(
     return {
         "images": batch["images"][0].detach().cpu().numpy(),
         "image": batch["images"][0, -1].detach().cpu().numpy(),
-        "motion": out["motion_fields"][0, -1].detach().cpu().numpy(),
-        "flow_gt": batch["flow_gt"][0, -1].detach().cpu().numpy(),
-        "flow_mask": batch["flow_mask"][0, -1].detach().cpu().numpy(),
+        "patch_motion_pred": out["patch_motion_pred"][0].detach().cpu().numpy(),
+        "patch_motion_teacher": batch["patch_motion_teacher"][0].detach().cpu().numpy(),
+        "patch_motion_mask": batch["patch_motion_mask"][0].detach().cpu().numpy(),
         "attention": out["attention_map"][0].detach().cpu().numpy(),
         "sun_prior": out["sun_prior"][0, 0].detach().cpu().numpy(),
         "title": str(frame["ts_target"]),
@@ -249,6 +249,15 @@ def train_model(config: dict) -> Path:
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
         peak_power_w=float(config["data"]["peak_power_w"]),
+        camera_index_csv=config["data"].get("camera_index_csv"),
+        image_match_tolerance_sec=int(config["data"].get("image_match_tolerance_sec", 75)),
+        motion_teacher_pairs_min=config["data"].get("motion_teacher_pairs_min"),
+        patch_grid_size=int(config["model"].get("patch_grid_size", 8)),
+        teacher_flow_resolution=int(config["data"].get("teacher_flow_resolution", 64)),
+        teacher_max_displacement_px=int(config["data"].get("teacher_max_displacement_px", 2)),
+        teacher_conf_threshold=float(config["data"].get("teacher_conf_threshold", 0.25)),
+        teacher_min_patch_vectors=int(config["data"].get("teacher_min_patch_vectors", 6)),
+        teacher_min_magnitude=float(config["data"].get("teacher_min_magnitude", 0.15)),
     )
     val_ds = SunConditionedPVDataset(
         csv_path=config["data"]["samples_csv"],
@@ -256,6 +265,15 @@ def train_model(config: dict) -> Path:
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
         peak_power_w=float(config["data"]["peak_power_w"]),
+        camera_index_csv=config["data"].get("camera_index_csv"),
+        image_match_tolerance_sec=int(config["data"].get("image_match_tolerance_sec", 75)),
+        motion_teacher_pairs_min=config["data"].get("motion_teacher_pairs_min"),
+        patch_grid_size=int(config["model"].get("patch_grid_size", 8)),
+        teacher_flow_resolution=int(config["data"].get("teacher_flow_resolution", 64)),
+        teacher_max_displacement_px=int(config["data"].get("teacher_max_displacement_px", 2)),
+        teacher_conf_threshold=float(config["data"].get("teacher_conf_threshold", 0.25)),
+        teacher_min_patch_vectors=int(config["data"].get("teacher_min_patch_vectors", 6)),
+        teacher_min_magnitude=float(config["data"].get("teacher_min_magnitude", 0.15)),
     )
     test_ds = SunConditionedPVDataset(
         csv_path=config["data"]["samples_csv"],
@@ -263,6 +281,15 @@ def train_model(config: dict) -> Path:
         image_size=tuple(config["data"]["image_size"]),
         sky_mask_path=config["data"].get("sky_mask_path"),
         peak_power_w=float(config["data"]["peak_power_w"]),
+        camera_index_csv=config["data"].get("camera_index_csv"),
+        image_match_tolerance_sec=int(config["data"].get("image_match_tolerance_sec", 75)),
+        motion_teacher_pairs_min=config["data"].get("motion_teacher_pairs_min"),
+        patch_grid_size=int(config["model"].get("patch_grid_size", 8)),
+        teacher_flow_resolution=int(config["data"].get("teacher_flow_resolution", 64)),
+        teacher_max_displacement_px=int(config["data"].get("teacher_max_displacement_px", 2)),
+        teacher_conf_threshold=float(config["data"].get("teacher_conf_threshold", 0.25)),
+        teacher_min_patch_vectors=int(config["data"].get("teacher_min_patch_vectors", 6)),
+        teacher_min_magnitude=float(config["data"].get("teacher_min_magnitude", 0.15)),
     )
     logger.info("Dataset sizes train=%d val=%d test=%d", len(train_ds), len(val_ds), len(test_ds))
 
@@ -307,12 +334,14 @@ def train_model(config: dict) -> Path:
             reg_loss = F.mse_loss(pred, data["target"])
             arch = config["model"].get("architecture", "minimal_sun_conditioned")
             if arch == "dual_timescale_sun_aware":
-                flow_loss = masked_smooth_l1_loss(out["flow_pred"], data["flow_gt"], data["flow_mask"])
-                dir_loss = masked_direction_loss(out["flow_pred"], data["flow_gt"], data["flow_mask"])
-                motion_loss = flow_loss + float(config["loss"].get("direction_loss_weight", 0.1)) * dir_loss
+                motion_loss = masked_patch_cosine_loss(
+                    out["patch_motion_pred"],
+                    data["patch_motion_teacher"],
+                    data["patch_motion_mask"],
+                )
                 total = reg_loss
-                if bool(config["loss"].get("enable_flow_aux", True)):
-                    total = total + float(config["loss"].get("flow_loss_weight", 0.05)) * motion_loss
+                if bool(config["loss"].get("enable_motion_supervision", True)):
+                    total = total + float(config["loss"].get("motion_supervision_weight", 0.05)) * motion_loss
             else:
                 motion_loss, motion_stats = motion_regularization_loss(
                     out["frame_features"],
@@ -376,26 +405,27 @@ def train_model(config: dict) -> Path:
         selected_visuals = _select_visual_samples(pred_df, config["train"])
         for idx, selection in enumerate(selected_visuals):
             item = _build_visual_item(model, split_ds, int(selection["sample_index"]), device)
-            save_motion_attention_figure(
-                image=item["image"],
-                motion=item["motion"],
-                attention=item["attention"],
-                out_path=run_dir
-                / "figures"
-                / f"motion_attention_{split_name}_{idx:02d}_{selection['category']}.png",
-                title=f"{item['title']} | {selection['category']}",
-            )
-            save_motion_flow_comparison_figure(
+            if config["model"].get("architecture", "minimal_sun_conditioned") != "dual_timescale_sun_aware":
+                save_motion_attention_figure(
+                    image=item["image"],
+                    motion=np.zeros((2, 8, 8), dtype=np.float32),
+                    attention=item["attention"],
+                    out_path=run_dir
+                    / "figures"
+                    / f"motion_attention_{split_name}_{idx:02d}_{selection['category']}.png",
+                    title=f"{item['title']} | {selection['category']}",
+                )
+            save_patch_motion_comparison_figure(
                 image_current=item["images"][-1],
                 image_prev_1=item["images"][-2],
                 image_prev_2=item["images"][-3],
-                flow_pred_recent=item["motion"],
-                flow_gt_recent=item["flow_gt"],
-                flow_mask_recent=item["flow_mask"],
+                patch_motion_pred=item["patch_motion_pred"],
+                patch_motion_teacher=item["patch_motion_teacher"],
+                patch_motion_mask=item["patch_motion_mask"],
                 sun_prior=item["sun_prior"],
                 out_path=run_dir
                 / "figures"
-                / f"motion_flow_compare_{split_name}_{idx:02d}_{selection['category']}.png",
+                / f"patch_motion_compare_{split_name}_{idx:02d}_{selection['category']}.png",
                 title=f"{item['title']} | {selection['category']}",
             )
 
