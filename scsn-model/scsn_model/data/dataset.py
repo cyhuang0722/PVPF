@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+from torch.utils.data import Dataset
+
+
+def load_mask(mask_path: str | Path, size: tuple[int, int]) -> np.ndarray:
+    mask = Image.open(mask_path).convert("L").resize((size[1], size[0]), resample=Image.NEAREST)
+    arr = (np.asarray(mask, dtype=np.float32) / 255.0 >= 0.5).astype(np.float32)
+    return arr[None, ...]
+
+
+def load_rgb_image(path: str | Path, size: tuple[int, int]) -> np.ndarray:
+    with Image.open(path) as im:
+        rgb = im.convert("RGB").resize((size[1], size[0]), resample=Image.BILINEAR)
+    arr = np.asarray(rgb, dtype=np.float32) / 255.0
+    return np.transpose(arr, (2, 0, 1))
+
+
+def _parse_jsonish(value: object) -> list[float] | list[str]:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"Unsupported sequence payload: {type(value)!r}")
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return ast.literal_eval(value)
+
+
+class SunConditionedCloudDataset(Dataset):
+    def __init__(
+        self,
+        csv_path: str | Path,
+        split: str,
+        image_size: tuple[int, int],
+        sky_mask_path: str | Path | None = None,
+        peak_power_w: float | None = None,
+    ) -> None:
+        self.df = pd.read_csv(csv_path)
+        self.df["ts_anchor"] = pd.to_datetime(self.df["ts_anchor"])
+        self.df["ts_target"] = pd.to_datetime(self.df["ts_target"])
+        self.df = self.df[self.df["split"] == split].reset_index(drop=True)
+        self.image_size = tuple(int(v) for v in image_size)
+        self.mask = load_mask(sky_mask_path, self.image_size) if sky_mask_path and Path(sky_mask_path).exists() else None
+        self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
+        if self.peak_power_w <= 0:
+            raise ValueError("peak_power_w must be positive.")
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, index: int) -> dict:
+        row = self.df.iloc[index]
+        img_paths = _parse_jsonish(row["img_paths"])
+        past_pv = np.asarray(_parse_jsonish(row["past_pv_w"]), dtype=np.float32)
+        solar_vec = np.asarray(_parse_jsonish(row["solar_vec"]), dtype=np.float32)
+
+        current_sun_xy = np.asarray([float(row["sun_x_px"]), float(row["sun_y_px"])], dtype=np.float32)
+        target_sun_xy = np.asarray(
+            [
+                float(row.get("target_sun_x_px", row["sun_x_px"])),
+                float(row.get("target_sun_y_px", row["sun_y_px"])),
+            ],
+            dtype=np.float32,
+        )
+
+        frames = np.stack([load_rgb_image(p, self.image_size) for p in img_paths], axis=0)
+        if self.mask is not None:
+            frames = frames * self.mask
+
+        input_frames = self._build_input_channels(frames=frames, sun_xy=current_sun_xy)
+        target_rbr = input_frames[-1, 3:4]
+
+        azimuth_rad = np.deg2rad(float(row["azimuth_deg"]))
+        elevation_rad = np.deg2rad(90.0 - float(row["zenith_deg"]))
+        sun_angles = np.asarray([azimuth_rad / np.pi, elevation_rad / (0.5 * np.pi)], dtype=np.float32)
+
+        target_azimuth_rad = np.deg2rad(float(row.get("target_azimuth_deg", row["azimuth_deg"])))
+        target_elevation_rad = np.deg2rad(90.0 - float(row.get("target_zenith_deg", row["zenith_deg"])))
+        target_sun_angles = np.asarray(
+            [target_azimuth_rad / np.pi, target_elevation_rad / (0.5 * np.pi)],
+            dtype=np.float32,
+        )
+
+        return {
+            "images": torch.from_numpy(input_frames.astype(np.float32)),
+            "pv_history": torch.tensor(past_pv / self.peak_power_w, dtype=torch.float32),
+            "solar_vec": torch.tensor(solar_vec, dtype=torch.float32),
+            "sun_angles": torch.tensor(sun_angles, dtype=torch.float32),
+            "target_sun_angles": torch.tensor(target_sun_angles, dtype=torch.float32),
+            "target": torch.tensor(float(row["target_value"]), dtype=torch.float32),
+            "target_pv_w": torch.tensor(float(row["target_pv_w"]), dtype=torch.float32),
+            "target_clear_sky_w": torch.tensor(float(row["target_clear_sky_w"]), dtype=torch.float32),
+            "sun_xy": torch.tensor(current_sun_xy, dtype=torch.float32),
+            "target_sun_xy": torch.tensor(target_sun_xy, dtype=torch.float32),
+            "target_rbr": torch.from_numpy(target_rbr.astype(np.float32)),
+            "meta_index": torch.tensor(index, dtype=torch.long),
+        }
+
+    def dataframe(self) -> pd.DataFrame:
+        return self.df.copy()
+
+    def _build_input_channels(self, frames: np.ndarray, sun_xy: np.ndarray) -> np.ndarray:
+        seq_len, _, height, width = frames.shape
+        mask = self.mask if self.mask is not None else np.ones((1, height, width), dtype=np.float32)
+        sun_distance = self._sun_distance_map(sun_xy=sun_xy, height=height, width=width)
+        repeated_mask = np.repeat(mask[None, ...], seq_len, axis=0)
+        repeated_distance = np.repeat(sun_distance[None, ...], seq_len, axis=0)
+        rbr = frames[:, 0:1] / np.clip(frames[:, 2:3], a_min=1e-3, a_max=None)
+        rbr = np.clip(rbr, 0.0, 4.0) / 4.0
+        return np.concatenate([frames, rbr, repeated_distance, repeated_mask], axis=1)
+
+    @staticmethod
+    def _sun_distance_map(sun_xy: np.ndarray, height: int, width: int) -> np.ndarray:
+        yy, xx = np.meshgrid(
+            np.arange(height, dtype=np.float32),
+            np.arange(width, dtype=np.float32),
+            indexing="ij",
+        )
+        dist = np.sqrt((xx - float(sun_xy[0])) ** 2 + (yy - float(sun_xy[1])) ** 2)
+        dist = dist / max(np.sqrt(height**2 + width**2), 1.0)
+        return dist[None, ...].astype(np.float32)
