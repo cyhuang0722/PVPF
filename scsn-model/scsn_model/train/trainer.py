@@ -95,6 +95,61 @@ def _select_visual_indices(pred_df: pd.DataFrame, limit: int) -> list[int]:
     return list(dict.fromkeys(int(v) for v in chosen["sample_index"].tolist()))[:limit]
 
 
+def _resize_like(tensor: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    return F.interpolate(tensor, size=reference.shape[-2:], mode="bilinear", align_corners=False)
+
+
+def _make_sampling_grid(flow: torch.Tensor) -> torch.Tensor:
+    batch, _, height, width = flow.shape
+    device = flow.device
+    yy, xx = torch.meshgrid(
+        torch.linspace(-1.0, 1.0, height, device=device),
+        torch.linspace(-1.0, 1.0, width, device=device),
+        indexing="ij",
+    )
+    base_grid = torch.stack([xx, yy], dim=-1).unsqueeze(0).expand(batch, -1, -1, -1)
+    flow_x = flow[:, 0] * (2.0 / max(width - 1, 1))
+    flow_y = flow[:, 1] * (2.0 / max(height - 1, 1))
+    return torch.stack([base_grid[..., 0] - flow_x, base_grid[..., 1] - flow_y], dim=-1)
+
+
+def _warp_with_flow(image: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
+    return F.grid_sample(image, _make_sampling_grid(flow), mode="bilinear", padding_mode="border", align_corners=True)
+
+
+def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, torch.Tensor], loss_cfg: dict) -> dict[str, torch.Tensor]:
+    current_opacity = output["current_opacity"]
+    current_gap = output["current_gap"]
+    current_transmission = output["current_transmission"]
+
+    opacity_proxy = _resize_like(data["opacity_proxy"], current_opacity)
+    gap_proxy = _resize_like(data["gap_proxy"], current_gap)
+    transmission_proxy = _resize_like(data["transmission_proxy"], current_transmission)
+
+    opacity_proxy_loss = F.l1_loss(current_opacity, opacity_proxy)
+    gap_proxy_loss = F.l1_loss(current_gap, gap_proxy)
+    transmission_proxy_loss = F.l1_loss(current_transmission, transmission_proxy)
+
+    prev_rbr = _resize_like(data["prev_rbr"], current_opacity)
+    curr_rbr = _resize_like(data["target_rbr"], current_opacity)
+    flow_now = output["motion_fields"][:, 0]
+    warped_prev = _warp_with_flow(prev_rbr, flow_now)
+    motion_warp_loss = F.l1_loss(warped_prev, curr_rbr)
+
+    return {
+        "opacity_proxy": opacity_proxy_loss,
+        "gap_proxy": gap_proxy_loss,
+        "transmission_proxy": transmission_proxy_loss,
+        "motion_warp": motion_warp_loss,
+        "total": (
+            float(loss_cfg.get("opacity_proxy_weight", 0.15)) * opacity_proxy_loss
+            + float(loss_cfg.get("gap_proxy_weight", 0.10)) * gap_proxy_loss
+            + float(loss_cfg.get("transmission_proxy_weight", 0.15)) * transmission_proxy_loss
+            + float(loss_cfg.get("motion_warp_weight", 0.10)) * motion_warp_loss
+        ),
+    }
+
+
 def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunConditionedCloudDataset, sample_index: int, device: torch.device) -> dict[str, np.ndarray | str]:
     model.eval()
     raw = dataset[sample_index]
@@ -189,7 +244,7 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": []}
+        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "opacity_proxy": [], "gap_proxy": [], "transmission_proxy": [], "motion_warp": []}
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -207,6 +262,9 @@ def train_model(config: dict) -> Path:
                 target_rbr=target_rbr,
                 loss_cfg=config["loss"],
             )
+            aux_losses = _compute_auxiliary_losses(out, data, config["loss"])
+            losses["total"] = losses["total"] + aux_losses["total"]
+            losses.update({key: value for key, value in aux_losses.items() if key != "total"})
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(config["loss"].get("grad_clip_norm", 5.0)))
             optimizer.step()
@@ -229,6 +287,10 @@ def train_model(config: dict) -> Path:
             "train_kl_loss": float(np.mean(epoch_stats["kl"])),
             "train_motion_loss": float(np.mean(epoch_stats["motion"])),
             "train_recon_loss": float(np.mean(epoch_stats["recon"])),
+            "train_opacity_proxy_loss": float(np.mean(epoch_stats["opacity_proxy"])),
+            "train_gap_proxy_loss": float(np.mean(epoch_stats["gap_proxy"])),
+            "train_transmission_proxy_loss": float(np.mean(epoch_stats["transmission_proxy"])),
+            "train_motion_warp_loss": float(np.mean(epoch_stats["motion_warp"])),
             "train_mae_w": float(train_metrics["mae"]),
             "train_rmse_w": float(train_metrics["rmse"]),
             "val_mae_w": float(val_metrics["mae"]),

@@ -78,6 +78,8 @@ class SunConditionedCloudDataset(Dataset):
 
         input_frames = self._build_input_channels(frames=frames, sun_xy=current_sun_xy)
         target_rbr = input_frames[-1, 3:4]
+        prev_rbr = input_frames[-2, 3:4] if input_frames.shape[0] > 1 else target_rbr.copy()
+        opacity_proxy, gap_proxy, transmission_proxy = self._build_state_proxies(frames[-1], target_rbr, target_sun_xy)
 
         azimuth_rad = np.deg2rad(float(row["azimuth_deg"]))
         elevation_rad = np.deg2rad(90.0 - float(row["zenith_deg"]))
@@ -102,6 +104,10 @@ class SunConditionedCloudDataset(Dataset):
             "sun_xy": torch.tensor(current_sun_xy, dtype=torch.float32),
             "target_sun_xy": torch.tensor(target_sun_xy, dtype=torch.float32),
             "target_rbr": torch.from_numpy(target_rbr.astype(np.float32)),
+            "prev_rbr": torch.from_numpy(prev_rbr.astype(np.float32)),
+            "opacity_proxy": torch.from_numpy(opacity_proxy.astype(np.float32)),
+            "gap_proxy": torch.from_numpy(gap_proxy.astype(np.float32)),
+            "transmission_proxy": torch.from_numpy(transmission_proxy.astype(np.float32)),
             "meta_index": torch.tensor(index, dtype=torch.long),
         }
 
@@ -128,3 +134,32 @@ class SunConditionedCloudDataset(Dataset):
         dist = np.sqrt((xx - float(sun_xy[0])) ** 2 + (yy - float(sun_xy[1])) ** 2)
         dist = dist / max(np.sqrt(height**2 + width**2), 1.0)
         return dist[None, ...].astype(np.float32)
+
+    def _build_state_proxies(
+        self,
+        frame_rgb: np.ndarray,
+        rbr_map: np.ndarray,
+        sun_xy: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        red = frame_rgb[0:1]
+        green = frame_rgb[1:2]
+        blue = frame_rgb[2:3]
+        brightness = np.clip(0.299 * red + 0.587 * green + 0.114 * blue, 0.0, 1.0)
+        whiteness = 1.0 - np.clip(np.abs(red - green) + np.abs(green - blue) + np.abs(red - blue), 0.0, 1.0)
+        rbr_cloud = np.clip((rbr_map - 0.28) / 0.45, 0.0, 1.0)
+        opacity = np.clip(0.55 * whiteness + 0.45 * rbr_cloud, 0.0, 1.0)
+
+        blueness = np.clip(blue - 0.5 * (red + green), 0.0, 1.0)
+        clarity = np.clip(0.65 * blueness + 0.35 * brightness, 0.0, 1.0)
+        gap = np.clip((1.0 - opacity) * 0.5 + clarity * 0.5, 0.0, 1.0)
+
+        sun_distance = self._sun_distance_map(sun_xy=sun_xy, height=frame_rgb.shape[1], width=frame_rgb.shape[2])
+        sun_focus = np.exp(-np.square(sun_distance / 0.22)).astype(np.float32)
+        transmission = np.clip((1.0 - opacity) * 0.55 + gap * 0.45, 0.0, 1.0)
+        transmission = np.clip(transmission * (0.8 + 0.2 * sun_focus), 0.0, 1.0)
+
+        if self.mask is not None:
+            opacity = opacity * self.mask
+            gap = gap * self.mask
+            transmission = transmission * self.mask
+        return opacity, gap, transmission

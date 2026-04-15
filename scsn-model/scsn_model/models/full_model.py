@@ -18,6 +18,8 @@ class SunConditionedStochasticCloudModel(nn.Module):
         self.future_steps = int(model_cfg.get("future_steps", 15))
         self.feature_hw = int(model_cfg.get("feature_resolution", 32))
         self.sun_sigma = float(model_cfg.get("sun_attention_sigma", 2.5))
+        self.spatial_feature_dim = int(model_cfg.get("spatial_feature_dim", 128))
+        self.sun_feature_dim = int(model_cfg.get("sun_feature_dim", 32))
 
         encoder_channels = list(model_cfg.get("frame_channels", [32, 64, 96, 128]))
         temporal_dim = int(model_cfg.get("temporal_hidden_dim", 256))
@@ -32,11 +34,18 @@ class SunConditionedStochasticCloudModel(nn.Module):
 
         self.image_encoder = ImageEncoder(in_channels=int(model_cfg.get("input_channels", 6)), channels=encoder_channels)
         self.temporal_encoder = TemporalCloudStateEncoder(input_dim=encoder_channels[-1], hidden_dim=temporal_dim)
-        self.latent_state = StructuredLatentState(in_dim=temporal_dim, latent_dims=latent_dims)
+        self.latent_state = StructuredLatentState(
+            in_dim=temporal_dim,
+            latent_dims=latent_dims,
+            spatial_dim=self.spatial_feature_dim,
+            sun_feature_dim=self.sun_feature_dim,
+        )
         self.dynamics = VariationalGRUDynamics(latent_dim=latent_total_dim, hidden_dim=dynamics_hidden, future_steps=self.future_steps)
         self.cloud_decoder = FutureCloudStateDecoder(
+            spatial_dim=self.spatial_feature_dim,
             latent_dim=latent_total_dim,
             hidden_dim=dynamics_hidden,
+            sun_feat_dim=self.sun_feature_dim,
             feature_hw=self.feature_hw,
             max_motion=float(model_cfg.get("max_motion_displacement", 2.5)),
         )
@@ -50,6 +59,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
             pv_history_dim=int(model_cfg.get("pv_history_dim", 4)),
             solar_dim=int(model_cfg.get("solar_feature_dim", 5)),
             hidden_dim=int(model_cfg.get("pv_hidden_dim", 64)),
+            use_global_cloud=bool(model_cfg.get("use_global_cloud_in_head", False)),
         )
 
     def forward(
@@ -64,12 +74,19 @@ class SunConditionedStochasticCloudModel(nn.Module):
         encoded = self.image_encoder(images.view(batch * seq_len, channels, height, width))
         encoded = encoded.view(batch, seq_len, encoded.shape[1], encoded.shape[2], encoded.shape[3])
 
-        cloud_feature = self.temporal_encoder(encoded)
-        latent = self.latent_state(cloud_feature)
+        temporal_out = self.temporal_encoder(encoded)
+        cloud_feature = temporal_out["spatial_feat"]
+        current_attention = self._build_sun_attention(sun_xy, cloud_feature.shape[-2], cloud_feature.shape[-1], height, width)
+        latent = self.latent_state(cloud_feature, current_attention)
         z0 = torch.cat([latent["samples"]["motion"], latent["samples"]["opacity"], latent["samples"]["gap"], latent["samples"]["sun"]], dim=-1)
 
         dynamics = self.dynamics(z0)
-        decoded = self.cloud_decoder(dynamics["future_z"], dynamics["hidden_seq"])
+        decoded = self.cloud_decoder(
+            dynamics["future_z"],
+            dynamics["hidden_seq"],
+            spatial_feat=latent["spatial_feat"],
+            sun_local_feat=latent["sun_local_feat"],
+        )
 
         target_sun_xy = target_sun_xy if target_sun_xy is not None else sun_xy
         attention_map = self._build_sun_attention(target_sun_xy, decoded["transmission_maps"].shape[-2], decoded["transmission_maps"].shape[-1], height, width)
@@ -83,7 +100,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
         sun_occlusion_risk = decoded["sun_occlusion"][:, -1:].contiguous()
 
         prediction = self.power_head(
-            pooled_cloud=latent["pooled"],
+            pooled_cloud=temporal_out["global_feat"],
             pv_history=pv_history,
             solar_vec=solar_vec,
             sun_local_transmission=sun_local_transmission,
@@ -99,8 +116,11 @@ class SunConditionedStochasticCloudModel(nn.Module):
             "gap_maps": decoded["gap_maps"],
             "sun_occlusion": decoded["sun_occlusion"],
             "transmission_maps": decoded["transmission_maps"],
+            "current_opacity": decoded["current_opacity"],
+            "current_gap": decoded["current_gap"],
+            "current_transmission": decoded["current_transmission"],
             "attention_map": attention_map,
-            "sun_prior": attention_map,
+            "sun_prior": current_attention,
             "recon_rbr": recon_rbr,
             "kl_loss": latent["kl_loss"],
             "motion_reg_loss": self._motion_smoothness(decoded["motion_fields"]),

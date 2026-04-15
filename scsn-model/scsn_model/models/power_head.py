@@ -27,15 +27,17 @@ class QuantileMLPHead(nn.Module):
 
 
 class SunConditionedPowerHead(nn.Module):
-    def __init__(self, cloud_dim: int, pv_history_dim: int, solar_dim: int, hidden_dim: int) -> None:
+    def __init__(self, cloud_dim: int, pv_history_dim: int, solar_dim: int, hidden_dim: int, use_global_cloud: bool = False) -> None:
         super().__init__()
+        self.use_global_cloud = use_global_cloud
         self.pv_encoder = nn.Sequential(
             nn.Linear(pv_history_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
-        self.head = QuantileMLPHead(in_dim=cloud_dim + hidden_dim + solar_dim + 4, hidden_dim=128)
+        head_in_dim = hidden_dim + solar_dim + 4 + (cloud_dim if use_global_cloud else 0)
+        self.head = QuantileMLPHead(in_dim=head_in_dim, hidden_dim=128)
 
     def forward(
         self,
@@ -48,16 +50,15 @@ class SunConditionedPowerHead(nn.Module):
         sun_occlusion_risk: torch.Tensor,
     ) -> torch.Tensor:
         pv_feature = self.pv_encoder(pv_history)
-        features = torch.cat(
-            [
-                pooled_cloud,
-                pv_feature,
-                solar_vec,
-                sun_local_transmission,
-                sun_local_gap,
-                sun_local_opacity,
-                sun_occlusion_risk,
-            ],
-            dim=-1,
-        )
+        feature_parts = [
+            pv_feature,
+            solar_vec,
+            sun_local_transmission,
+            sun_local_gap,
+            sun_local_opacity,
+            sun_occlusion_risk,
+        ]
+        if self.use_global_cloud:
+            feature_parts.insert(0, pooled_cloud)
+        features = torch.cat(feature_parts, dim=-1)
         return self.head(features)

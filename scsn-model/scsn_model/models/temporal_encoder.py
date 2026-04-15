@@ -39,9 +39,14 @@ class TemporalCloudStateEncoder(nn.Module):
         self.cell = ConvLSTMCell(input_dim=input_dim, hidden_dim=hidden_dim)
         self.refine = ResidualBlock(hidden_dim)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def forward(self, features: torch.Tensor) -> dict[str, torch.Tensor]:
         state: tuple[torch.Tensor, torch.Tensor] | None = None
         for t in range(features.shape[1]):
             state = self.cell(features[:, t], state)
         hidden, _ = state
-        return self.refine(hidden)
+        spatial_feat = self.refine(hidden)
+        global_feat = spatial_feat.mean(dim=(2, 3))
+        return {
+            "spatial_feat": spatial_feat,
+            "global_feat": global_feat,
+        }

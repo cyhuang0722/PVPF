@@ -4,45 +4,82 @@ import torch
 import torch.nn as nn
 
 
+class ResidualConvBlock(nn.Module):
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.act(self.conv1(x))
+        x = self.conv2(x)
+        return self.act(x + residual)
+
+
 class FutureCloudStateDecoder(nn.Module):
-    def __init__(self, latent_dim: int, hidden_dim: int, feature_hw: int, max_motion: float) -> None:
+    def __init__(self, spatial_dim: int, latent_dim: int, hidden_dim: int, sun_feat_dim: int, feature_hw: int, max_motion: float) -> None:
         super().__init__()
         self.feature_hw = feature_hw
         self.max_motion = max_motion
-        decoded_dim = latent_dim + hidden_dim
-        self.motion_decoder = nn.Sequential(
-            nn.Linear(decoded_dim, 256),
+        in_channels = spatial_dim + latent_dim + hidden_dim + sun_feat_dim
+        trunk_channels = max(spatial_dim, 128)
+        self.input_proj = nn.Sequential(
+            nn.Conv2d(in_channels, trunk_channels, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.Linear(256, 2 * feature_hw * feature_hw),
+            ResidualConvBlock(trunk_channels),
+            ResidualConvBlock(trunk_channels),
         )
-        self.opacity_decoder = nn.Sequential(
-            nn.Linear(decoded_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, feature_hw * feature_hw),
-        )
-        self.gap_decoder = nn.Sequential(
-            nn.Linear(decoded_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, feature_hw * feature_hw),
-        )
+        self.motion_head = nn.Conv2d(trunk_channels, 2, kernel_size=3, padding=1)
+        self.opacity_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.gap_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.transmission_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.sun_occ_decoder = nn.Sequential(
-            nn.Linear(decoded_dim, 64),
+            nn.Linear(latent_dim + hidden_dim + sun_feat_dim, 64),
             nn.GELU(),
             nn.Linear(64, 1),
         )
+        self.current_state_head = nn.Sequential(
+            nn.Conv2d(spatial_dim + sun_feat_dim, trunk_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            ResidualConvBlock(trunk_channels),
+        )
+        self.current_opacity = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.current_gap = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.current_transmission = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
 
-    def forward(self, future_z: torch.Tensor, hidden_seq: torch.Tensor) -> dict[str, torch.Tensor]:
-        batch, steps, _, = future_z.shape
-        decoded = torch.cat([future_z, hidden_seq], dim=-1)
-        motion = torch.tanh(self.motion_decoder(decoded)).view(batch, steps, 2, self.feature_hw, self.feature_hw) * self.max_motion
-        opacity = torch.sigmoid(self.opacity_decoder(decoded)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
-        gap = torch.sigmoid(self.gap_decoder(decoded)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
-        sun_occ = torch.sigmoid(self.sun_occ_decoder(decoded)).squeeze(-1)
-        transmission = torch.clamp((1.0 - opacity) * (0.25 + 0.75 * gap), 0.0, 1.0)
+    def forward(self, future_z: torch.Tensor, hidden_seq: torch.Tensor, spatial_feat: torch.Tensor, sun_local_feat: torch.Tensor) -> dict[str, torch.Tensor]:
+        batch, steps, _ = future_z.shape
+        spatial_rep = spatial_feat.unsqueeze(1).expand(-1, steps, -1, -1, -1)
+        hidden_map = hidden_seq.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.feature_hw, self.feature_hw)
+        z_map = future_z.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.feature_hw, self.feature_hw)
+        sun_map = sun_local_feat.unsqueeze(1).unsqueeze(-1).unsqueeze(-1).expand(-1, steps, -1, self.feature_hw, self.feature_hw)
+        decoder_in = torch.cat([spatial_rep, z_map, hidden_map, sun_map], dim=2).reshape(batch * steps, -1, self.feature_hw, self.feature_hw)
+        trunk = self.input_proj(decoder_in)
+        motion = torch.tanh(self.motion_head(trunk)).view(batch, steps, 2, self.feature_hw, self.feature_hw) * self.max_motion
+        opacity = torch.sigmoid(self.opacity_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
+        gap = torch.sigmoid(self.gap_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
+        transmission = torch.sigmoid(self.transmission_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
+        sun_occ_in = torch.cat([future_z, hidden_seq, sun_local_feat.unsqueeze(1).expand(-1, steps, -1)], dim=-1)
+        sun_occ = torch.sigmoid(self.sun_occ_decoder(sun_occ_in)).squeeze(-1)
+
+        current_in = torch.cat(
+            [
+                spatial_feat,
+                sun_local_feat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, self.feature_hw, self.feature_hw),
+            ],
+            dim=1,
+        )
+        current_feat = self.current_state_head(current_in)
         return {
             "motion_fields": motion,
             "opacity_maps": opacity,
             "gap_maps": gap,
             "sun_occlusion": sun_occ,
             "transmission_maps": transmission,
+            "decoder_feat": trunk.view(batch, steps, -1, self.feature_hw, self.feature_hw),
+            "current_opacity": torch.sigmoid(self.current_opacity(current_feat)),
+            "current_gap": torch.sigmoid(self.current_gap(current_feat)),
+            "current_transmission": torch.sigmoid(self.current_transmission(current_feat)),
         }

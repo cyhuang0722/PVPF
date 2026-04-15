@@ -41,6 +41,8 @@
     "frame_channels": [32, 64, 96, 128],
     "feature_resolution": 32,
     "temporal_hidden_dim": 256,
+    "spatial_feature_dim": 128,
+    "sun_feature_dim": 32,
     "motion_latent_dim": 64,
     "opacity_latent_dim": 32,
     "gap_latent_dim": 32,
@@ -51,7 +53,8 @@
     "pv_hidden_dim": 64,
     "head_hidden_dim": 128,
     "max_motion_displacement": 2.5,
-    "sun_attention_sigma": 2.5
+    "sun_attention_sigma": 2.5,
+    "use_global_cloud_in_head": false
   },
   "loss": {
     "pv_weight": 1.0,
@@ -59,6 +62,10 @@
     "kl_weight": 0.02,
     "motion_weight": 0.01,
     "reconstruction_weight": 0.2,
+    "opacity_proxy_weight": 0.15,
+    "gap_proxy_weight": 0.10,
+    "transmission_proxy_weight": 0.15,
+    "motion_warp_weight": 0.10,
     "grad_clip_norm": 5.0
   },
   "train": {
