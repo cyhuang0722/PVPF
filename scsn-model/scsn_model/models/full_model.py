@@ -20,6 +20,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
         self.sun_sigma = float(model_cfg.get("sun_attention_sigma", 2.5))
         self.spatial_feature_dim = int(model_cfg.get("spatial_feature_dim", 128))
         self.sun_feature_dim = int(model_cfg.get("sun_feature_dim", 32))
+        self.disable_sun_attention = bool(model_cfg.get("disable_sun_attention", False))
 
         encoder_channels = list(model_cfg.get("frame_channels", [32, 64, 96, 128]))
         temporal_dim = int(model_cfg.get("temporal_hidden_dim", 256))
@@ -134,6 +135,12 @@ class SunConditionedStochasticCloudModel(nn.Module):
         image_h: int,
         image_w: int,
     ) -> torch.Tensor:
+        if self.disable_sun_attention:
+            return torch.ones(
+                (sun_xy.shape[0], 1, feat_h, feat_w),
+                device=sun_xy.device,
+                dtype=torch.float32,
+            )
         device = sun_xy.device
         yy, xx = torch.meshgrid(
             torch.arange(feat_h, device=device, dtype=torch.float32),
