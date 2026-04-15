@@ -10,12 +10,41 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..data.dataset import SunConditionedCloudDataset
-from ..losses.scsn import scsn_training_loss
+from ..losses.quantile import quantile_crossing_penalty, quantile_loss
 from ..models.full_model import SunConditionedStochasticCloudModel
 from ..utils.io import ensure_dir, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
 from ..viz.motion import save_scsn_state_figure
 from .metrics import regression_metrics
+
+try:
+    from ..losses.scsn import scsn_training_loss
+except ModuleNotFoundError:
+    def scsn_training_loss(
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        kl_loss: torch.Tensor,
+        motion_reg_loss: torch.Tensor,
+        recon_rbr: torch.Tensor,
+        target_rbr: torch.Tensor,
+        loss_cfg: dict,
+    ) -> dict[str, torch.Tensor]:
+        pv_loss = quantile_loss(prediction, target, [0.1, 0.5, 0.9])
+        pv_loss = pv_loss + float(loss_cfg.get("crossing_weight", 0.2)) * quantile_crossing_penalty(prediction)
+        recon_loss = F.l1_loss(recon_rbr, target_rbr)
+        total = (
+            float(loss_cfg.get("pv_weight", 1.0)) * pv_loss
+            + float(loss_cfg.get("kl_weight", 0.02)) * kl_loss
+            + float(loss_cfg.get("motion_weight", 0.01)) * motion_reg_loss
+            + float(loss_cfg.get("reconstruction_weight", 0.2)) * recon_loss
+        )
+        return {
+            "total": total,
+            "pv": pv_loss,
+            "kl": kl_loss,
+            "motion": motion_reg_loss,
+            "recon": recon_loss,
+        }
 
 
 def _setup_logger(run_dir: Path) -> logging.Logger:
