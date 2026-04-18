@@ -91,14 +91,17 @@ class SunConditionedStochasticCloudModel(nn.Module):
 
         target_sun_xy = target_sun_xy if target_sun_xy is not None else sun_xy
         attention_map = self._build_sun_attention(target_sun_xy, decoded["transmission_maps"].shape[-2], decoded["transmission_maps"].shape[-1], height, width)
-        final_transmission = decoded["transmission_maps"][:, -1]
-        final_gap = decoded["gap_maps"][:, -1]
-        final_opacity = decoded["opacity_maps"][:, -1]
+        final_cloud_prob = decoded["future_cloud_prob_maps"][:, -1]
         attention_norm = attention_map.sum(dim=(2, 3)).clamp_min(1e-6)
-        sun_local_transmission = (final_transmission * attention_map).sum(dim=(2, 3)) / attention_norm
-        sun_local_gap = (final_gap * attention_map).sum(dim=(2, 3)) / attention_norm
-        sun_local_opacity = (final_opacity * attention_map).sum(dim=(2, 3)) / attention_norm
-        sun_occlusion_risk = decoded["sun_occlusion"][:, -1:].contiguous()
+        sun_local_cloud_prob = (final_cloud_prob * attention_map).sum(dim=(2, 3)) / attention_norm
+        future_sun_cloud_prob = (
+            decoded["future_cloud_prob_maps"] * attention_map.unsqueeze(1)
+        ).sum(dim=(3, 4)).squeeze(-1) / attention_norm.unsqueeze(1).squeeze(-1)
+        global_cloud_prob = final_cloud_prob.mean(dim=(2, 3))
+        sun_local_transmission = 1.0 - sun_local_cloud_prob
+        sun_local_gap = 1.0 - global_cloud_prob
+        sun_local_opacity = sun_local_cloud_prob
+        sun_occlusion_risk = torch.maximum(decoded["sun_occlusion"][:, -1:].contiguous(), sun_local_cloud_prob)
 
         prediction = self.power_head(
             pooled_cloud=temporal_out["global_feat"],
@@ -117,9 +120,12 @@ class SunConditionedStochasticCloudModel(nn.Module):
             "gap_maps": decoded["gap_maps"],
             "sun_occlusion": decoded["sun_occlusion"],
             "transmission_maps": decoded["transmission_maps"],
+            "future_cloud_prob_maps": decoded["future_cloud_prob_maps"],
+            "future_sun_cloud_prob": future_sun_cloud_prob,
             "current_opacity": decoded["current_opacity"],
             "current_gap": decoded["current_gap"],
             "current_transmission": decoded["current_transmission"],
+            "current_cloud_prob": decoded["current_cloud_prob"],
             "attention_map": attention_map,
             "sun_prior": current_attention,
             "recon_rbr": recon_rbr,

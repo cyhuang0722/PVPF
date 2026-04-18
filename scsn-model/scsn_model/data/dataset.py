@@ -10,6 +10,8 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from .cloud_mask_supervision import CloudMaskSupervisor
+
 
 def load_mask(mask_path: str | Path, size: tuple[int, int]) -> np.ndarray:
     mask = Image.open(mask_path).convert("L").resize((size[1], size[0]), resample=Image.NEAREST)
@@ -18,10 +20,25 @@ def load_mask(mask_path: str | Path, size: tuple[int, int]) -> np.ndarray:
 
 
 def load_rgb_image(path: str | Path, size: tuple[int, int]) -> np.ndarray:
+    path = resolve_existing_path(path)
     with Image.open(path) as im:
         rgb = im.convert("RGB").resize((size[1], size[0]), resample=Image.BILINEAR)
     arr = np.asarray(rgb, dtype=np.float32) / 255.0
     return np.transpose(arr, (2, 0, 1))
+
+
+def resolve_existing_path(path: str | Path) -> Path:
+    candidate = Path(path)
+    if candidate.exists():
+        return candidate
+    text = str(candidate)
+    legacy_prefix = "/home/chuangbn/projects/PVPF"
+    local_prefix = "/Users/huangchouyue/Projects/PVPF"
+    if text.startswith(legacy_prefix):
+        remapped = Path(local_prefix + text[len(legacy_prefix) :])
+        if remapped.exists():
+            return remapped
+    return candidate
 
 
 def _parse_jsonish(value: object) -> list[float] | list[str]:
@@ -43,6 +60,8 @@ class SunConditionedCloudDataset(Dataset):
         image_size: tuple[int, int],
         sky_mask_path: str | Path | None = None,
         peak_power_w: float | None = None,
+        cloud_mask_manifest_path: str | Path | None = None,
+        cloud_mask_sky_mask_path: str | Path | None = None,
     ) -> None:
         self.df = pd.read_csv(csv_path)
         self.df["ts_anchor"] = pd.to_datetime(self.df["ts_anchor"])
@@ -53,6 +72,16 @@ class SunConditionedCloudDataset(Dataset):
         self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
         if self.peak_power_w <= 0:
             raise ValueError("peak_power_w must be positive.")
+        self.cloud_mask_supervisor = None
+        if cloud_mask_manifest_path and cloud_mask_sky_mask_path:
+            manifest_path = Path(cloud_mask_manifest_path)
+            mask_path = Path(cloud_mask_sky_mask_path)
+            if manifest_path.exists() and mask_path.exists():
+                self.cloud_mask_supervisor = CloudMaskSupervisor(
+                    manifest_path=manifest_path,
+                    sky_mask_path=mask_path,
+                    image_size=self.image_size,
+                )
 
     def __len__(self) -> int:
         return len(self.df)
@@ -75,6 +104,7 @@ class SunConditionedCloudDataset(Dataset):
         frames = np.stack([load_rgb_image(p, self.image_size) for p in img_paths], axis=0)
         if self.mask is not None:
             frames = frames * self.mask
+        cloud_mask, cloud_mask_valid = self._load_cloud_mask(img_paths[-1])
 
         input_frames = self._build_input_channels(frames=frames, sun_xy=current_sun_xy)
         target_rbr = input_frames[-1, 3:4]
@@ -108,6 +138,8 @@ class SunConditionedCloudDataset(Dataset):
             "opacity_proxy": torch.from_numpy(opacity_proxy.astype(np.float32)),
             "gap_proxy": torch.from_numpy(gap_proxy.astype(np.float32)),
             "transmission_proxy": torch.from_numpy(transmission_proxy.astype(np.float32)),
+            "cloud_mask": torch.from_numpy(cloud_mask.astype(np.float32)),
+            "cloud_mask_valid": torch.tensor(cloud_mask_valid, dtype=torch.float32),
             "meta_index": torch.tensor(index, dtype=torch.long),
         }
 
@@ -163,3 +195,14 @@ class SunConditionedCloudDataset(Dataset):
             gap = gap * self.mask
             transmission = transmission * self.mask
         return opacity, gap, transmission
+
+    def _load_cloud_mask(self, current_image_path: str | Path) -> tuple[np.ndarray, float]:
+        empty = np.zeros((1, self.image_size[0], self.image_size[1]), dtype=np.float32)
+        if self.cloud_mask_supervisor is None:
+            return empty, 0.0
+        mask = self.cloud_mask_supervisor.lookup(resolve_existing_path(current_image_path))
+        if mask is None:
+            return empty, 0.0
+        if self.mask is not None:
+            mask = mask * self.mask
+        return mask.astype(np.float32), 1.0

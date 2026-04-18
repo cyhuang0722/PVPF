@@ -121,6 +121,7 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
     current_opacity = output["current_opacity"]
     current_gap = output["current_gap"]
     current_transmission = output["current_transmission"]
+    current_cloud_prob = output["current_cloud_prob"]
 
     opacity_proxy = _resize_like(data["opacity_proxy"], current_opacity)
     gap_proxy = _resize_like(data["gap_proxy"], current_gap)
@@ -136,16 +137,31 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
     warped_prev = _warp_with_flow(prev_rbr, flow_now)
     motion_warp_loss = F.l1_loss(warped_prev, curr_rbr)
 
+    cloud_mask_loss = current_cloud_prob.new_zeros(())
+    if "cloud_mask" in data and "cloud_mask_valid" in data:
+        valid = data["cloud_mask_valid"].view(-1, 1, 1, 1)
+        if torch.any(valid > 0):
+            pseudo_cloud = _resize_like(data["cloud_mask"], current_cloud_prob).clamp(0.0, 1.0)
+            valid_count = valid.sum().clamp_min(1.0)
+            cloud_bce = F.binary_cross_entropy(current_cloud_prob.clamp(1e-4, 1.0 - 1e-4), pseudo_cloud, reduction="none")
+            cloud_pixel_loss = (cloud_bce * valid).mean(dim=(1, 2, 3)).sum() / valid_count
+            pred_fraction = current_cloud_prob.mean(dim=(1, 2, 3))
+            target_fraction = pseudo_cloud.mean(dim=(1, 2, 3))
+            cloud_fraction_loss = (torch.abs(pred_fraction - target_fraction) * valid.view(-1)).sum() / valid_count
+            cloud_mask_loss = cloud_pixel_loss + float(loss_cfg.get("cloud_fraction_weight", 0.25)) * cloud_fraction_loss
+
     return {
         "opacity_proxy": opacity_proxy_loss,
         "gap_proxy": gap_proxy_loss,
         "transmission_proxy": transmission_proxy_loss,
         "motion_warp": motion_warp_loss,
+        "cloud_mask": cloud_mask_loss,
         "total": (
             float(loss_cfg.get("opacity_proxy_weight", 0.15)) * opacity_proxy_loss
             + float(loss_cfg.get("gap_proxy_weight", 0.10)) * gap_proxy_loss
             + float(loss_cfg.get("transmission_proxy_weight", 0.15)) * transmission_proxy_loss
             + float(loss_cfg.get("motion_warp_weight", 0.10)) * motion_warp_loss
+            + float(loss_cfg.get("cloud_mask_weight", 0.0)) * cloud_mask_loss
         ),
     }
 
@@ -160,10 +176,11 @@ def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunCo
     return {
         "image": batch["images"][0, -1, :3].detach().cpu().numpy(),
         "attention": out["attention_map"][0, 0].detach().cpu().numpy(),
-        "transmission": out["transmission_maps"][0, -1, 0].detach().cpu().numpy(),
-        "opacity": out["opacity_maps"][0, -1, 0].detach().cpu().numpy(),
-        "gap": out["gap_maps"][0, -1, 0].detach().cpu().numpy(),
-        "sun_occlusion": out["sun_occlusion"][0].detach().cpu().numpy(),
+        "current_cloud_prob": out["current_cloud_prob"][0, 0].detach().cpu().numpy(),
+        "future_cloud_prob": out["future_cloud_prob_maps"][0, -1, 0].detach().cpu().numpy(),
+        "future_sun_cloud_prob": out["future_sun_cloud_prob"][0].detach().cpu().numpy(),
+        "cloud_mask": batch["cloud_mask"][0, 0].detach().cpu().numpy(),
+        "cloud_mask_valid": bool(batch["cloud_mask_valid"][0].detach().cpu().item() > 0.0),
         "motion_u": out["motion_fields"][0, -1, 0].detach().cpu().numpy(),
         "motion_v": out["motion_fields"][0, -1, 1].detach().cpu().numpy(),
         "title": str(frame["ts_target"]),
@@ -225,6 +242,8 @@ def train_model(config: dict) -> Path:
             image_size=tuple(config["data"]["image_size"]),
             sky_mask_path=config["data"].get("sky_mask_path"),
             peak_power_w=float(config["data"]["peak_power_w"]),
+            cloud_mask_manifest_path=config["data"].get("cloud_mask_manifest_path"),
+            cloud_mask_sky_mask_path=config["data"].get("cloud_mask_sky_mask_path", config["data"].get("sky_mask_path")),
         )
         for split in ("train", "val", "test")
     }
@@ -244,7 +263,7 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "opacity_proxy": [], "gap_proxy": [], "transmission_proxy": [], "motion_warp": []}
+        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "opacity_proxy": [], "gap_proxy": [], "transmission_proxy": [], "motion_warp": [], "cloud_mask": []}
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -291,6 +310,7 @@ def train_model(config: dict) -> Path:
             "train_gap_proxy_loss": float(np.mean(epoch_stats["gap_proxy"])),
             "train_transmission_proxy_loss": float(np.mean(epoch_stats["transmission_proxy"])),
             "train_motion_warp_loss": float(np.mean(epoch_stats["motion_warp"])),
+            "train_cloud_mask_loss": float(np.mean(epoch_stats["cloud_mask"])),
             "train_mae_w": float(train_metrics["mae"]),
             "train_rmse_w": float(train_metrics["rmse"]),
             "val_mae_w": float(val_metrics["mae"]),
@@ -332,13 +352,14 @@ def train_model(config: dict) -> Path:
             save_scsn_state_figure(
                 image=item["image"],
                 attention=item["attention"],
-                transmission=item["transmission"],
-                opacity=item["opacity"],
-                gap=item["gap"],
+                current_cloud_prob=item["current_cloud_prob"],
+                future_cloud_prob=item["future_cloud_prob"],
                 motion_u=item["motion_u"],
                 motion_v=item["motion_v"],
-                sun_occlusion=item["sun_occlusion"],
+                future_sun_cloud_prob=item["future_sun_cloud_prob"],
                 out_path=run_dir / "figures" / f"cloud_state_{split_name}_{idx:02d}.png",
                 title=str(item["title"]),
+                cloud_mask=item["cloud_mask"],
+                cloud_mask_valid=bool(item["cloud_mask_valid"]),
             )
     return run_dir

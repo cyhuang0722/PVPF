@@ -35,6 +35,7 @@ class FutureCloudStateDecoder(nn.Module):
         self.opacity_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.gap_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.transmission_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.cloud_prob_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.sun_occ_decoder = nn.Sequential(
             nn.Linear(latent_dim + hidden_dim + sun_feat_dim, 64),
             nn.GELU(),
@@ -48,6 +49,7 @@ class FutureCloudStateDecoder(nn.Module):
         self.current_opacity = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.current_gap = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.current_transmission = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.current_cloud_prob = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
 
     def forward(self, future_z: torch.Tensor, hidden_seq: torch.Tensor, spatial_feat: torch.Tensor, sun_local_feat: torch.Tensor) -> dict[str, torch.Tensor]:
         batch, steps, _ = future_z.shape
@@ -61,6 +63,7 @@ class FutureCloudStateDecoder(nn.Module):
         opacity = torch.sigmoid(self.opacity_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
         gap = torch.sigmoid(self.gap_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
         transmission = torch.sigmoid(self.transmission_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
+        cloud_prob = torch.sigmoid(self.cloud_prob_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
         sun_occ_in = torch.cat([future_z, hidden_seq, sun_local_feat.unsqueeze(1).expand(-1, steps, -1)], dim=-1)
         sun_occ = torch.sigmoid(self.sun_occ_decoder(sun_occ_in)).squeeze(-1)
 
@@ -78,8 +81,10 @@ class FutureCloudStateDecoder(nn.Module):
             "gap_maps": gap,
             "sun_occlusion": sun_occ,
             "transmission_maps": transmission,
+            "future_cloud_prob_maps": cloud_prob,
             "decoder_feat": trunk.view(batch, steps, -1, self.feature_hw, self.feature_hw),
             "current_opacity": torch.sigmoid(self.current_opacity(current_feat)),
             "current_gap": torch.sigmoid(self.current_gap(current_feat)),
             "current_transmission": torch.sigmoid(self.current_transmission(current_feat)),
+            "current_cloud_prob": torch.sigmoid(self.current_cloud_prob(current_feat)),
         }

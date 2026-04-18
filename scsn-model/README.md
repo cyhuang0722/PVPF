@@ -32,9 +32,10 @@ scsn-model/
 - 编码：`Image Encoder + ConvLSTM`
 - 结构化潜变量：`z_motion / z_opacity / z_gap / z_sun`
 - 动力学：`Variational GRU`
-- 解码：未来15步的 `motion / opacity / gap / sun occlusion / transmission`
+- 解码：未来15步的 `motion / cloud probability / sun-region cloud probability`
 - 预测头：输出`q10 / q50 / q90`
 - 训练损失：`Pinball + quantile crossing + KL + motion smoothness + RBR reconstruction`
+- 弱监督：可选读取 `cloud_seg/outputs_final/manifests/hourly_summary.csv`，按输入末帧匹配 cloudy/clear 图对，重算 cloud mask 后只监督当前 `cloud probability`
 
 ## 使用方法
 
@@ -87,4 +88,15 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
 - 旧版特征聚合拼装方式
 - 任何依赖旧最小基线设计的模型分支
 
-`cloud_state_*.png`会展示输入末帧、太阳注意力、transmission、opacity、gap、未来运动场和sun occlusion曲线，便于检查模型是否学到了你希望的可解释云状态。
+`cloud_state_*.png`会展示输入末帧、太阳注意力、当前/未来云概率、可用的 pseudo cloud mask、未来运动场、太阳区域未来云概率曲线和未来云不确定性，避免把不可验证的 `transmission / opacity / gap` 空间图当作强物理解释。
+
+## Cloud Mask 弱监督
+
+`configs/base.json` 和 `configs/experiment_no_sun_attention.json` 默认启用了：
+
+- `data.cloud_mask_manifest_path`: `/Users/huangchouyue/Projects/PVPF/cloud_seg/outputs_final/manifests/hourly_summary.csv`
+- `data.cloud_mask_sky_mask_path`: `/Users/huangchouyue/Projects/PVPF/data/sky_mask.png`
+- `loss.cloud_mask_weight`: `0.05`
+- `loss.cloud_fraction_weight`: `0.25`
+
+训练时只有能按输入序列末帧文件名命中 manifest 的样本会计算这项 loss；没有 cloud mask 的样本保持原来的训练逻辑。`opacity_proxy / gap_proxy / transmission_proxy` 默认权重已设为 `0.0`，避免 noisy mask 被强行解释成像素级光学状态。
