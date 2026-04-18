@@ -50,12 +50,27 @@ class CloudMaskConfig:
     bright_cloud_saturation_threshold: float = 0.58
 
 
+def _resolve_existing_path(path: str | Path) -> Path:
+    candidate = Path(path)
+    if candidate.exists():
+        return candidate
+    text = str(candidate)
+    legacy_prefix = "/home/chuangbn/projects/PVPF"
+    local_prefix = "/Users/huangchouyue/Projects/PVPF"
+    if text.startswith(legacy_prefix):
+        remapped = Path(local_prefix + text[len(legacy_prefix) :])
+        if remapped.exists():
+            return remapped
+    return candidate
+
+
 def _require_scipy() -> None:
     if gaussian_filter is None or label is None:
         raise RuntimeError("cloud mask weak supervision requires scipy to be installed.")
 
 
 def _load_rgb_image(path: Path, image_size: int) -> np.ndarray:
+    path = _resolve_existing_path(path)
     with Image.open(path) as im:
         rgb = im.convert("RGB")
         if rgb.size != (image_size, image_size):
@@ -64,6 +79,7 @@ def _load_rgb_image(path: Path, image_size: int) -> np.ndarray:
 
 
 def _load_sky_mask(path: Path, image_size: int) -> np.ndarray:
+    path = _resolve_existing_path(path)
     with Image.open(path) as im:
         mask = im.convert("L")
         if mask.size != (image_size, image_size):
@@ -209,8 +225,8 @@ class CloudMaskSupervisor:
         image_size: tuple[int, int],
         cfg: CloudMaskConfig | None = None,
     ) -> None:
-        self.manifest_path = Path(manifest_path)
-        self.sky_mask_path = Path(sky_mask_path)
+        self.manifest_path = _resolve_existing_path(manifest_path)
+        self.sky_mask_path = _resolve_existing_path(sky_mask_path)
         self.height, self.width = int(image_size[0]), int(image_size[1])
         if self.height != self.width:
             raise ValueError("Cloud mask supervision currently expects square cloud_seg masks.")
@@ -222,7 +238,7 @@ class CloudMaskSupervisor:
         if missing:
             raise ValueError(f"{self.manifest_path} is missing columns: {sorted(missing)}")
         self._pairs = {
-            Path(row.cloudy_image_path).name: (Path(row.cloudy_image_path), Path(row.clear_image_path))
+            Path(row.cloudy_image_path).name: (_resolve_existing_path(row.cloudy_image_path), _resolve_existing_path(row.clear_image_path))
             for row in manifest.itertuples(index=False)
         }
         self._cache: dict[str, np.ndarray] = {}
@@ -239,3 +255,6 @@ class CloudMaskSupervisor:
             mask = compute_cloud_mask_from_pair(cloudy_rgb, clear_rgb, self.sky_mask, self.cfg)
             self._cache[key] = mask[None, ...].astype(np.float32)
         return self._cache[key]
+
+    def available_keys(self) -> list[str]:
+        return list(self._pairs.keys())

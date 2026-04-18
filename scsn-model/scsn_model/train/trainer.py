@@ -9,7 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from ..data.dataset import SunConditionedCloudDataset
+from ..data.dataset import SunConditionedCloudDataset, _parse_jsonish, resolve_existing_path
+from ..data.solar_geometry import Calibration, compute_clear_sky_power
 from ..losses.quantile import quantile_crossing_penalty, quantile_loss
 from ..models.full_model import SunConditionedStochasticCloudModel
 from ..utils.io import ensure_dir, save_json, set_seed, timestamped_run_dir
@@ -80,6 +81,47 @@ def _target_to_w(values: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_inde
     if use_clear_sky_index:
         clipped = clipped * clear_sky_w
     return np.clip(clipped, a_min=0.0, a_max=None)
+
+
+def _persistence_metrics(dataset: SunConditionedCloudDataset) -> dict[str, float]:
+    df = dataset.dataframe()
+    pred = []
+    target = []
+    for row in df.itertuples(index=False):
+        past_pv = np.asarray(_parse_jsonish(row.past_pv_w), dtype=np.float32)
+        pred.append(float(past_pv[-1]))
+        target.append(float(row.target_pv_w))
+    metrics = regression_metrics(np.asarray(pred, dtype=np.float32), np.asarray(target, dtype=np.float32))
+    metrics["n_samples"] = int(len(target))
+    return metrics
+
+
+def _smart_persistence_predictions(dataset: SunConditionedCloudDataset, config: dict) -> np.ndarray:
+    df = dataset.dataframe()
+    data_cfg = config["data"]
+    calib = Calibration.from_json(resolve_existing_path(data_cfg["calibration_json"]))
+    anchor_clear = compute_clear_sky_power(
+        pd.to_datetime(df["ts_anchor"]).tolist(),
+        calib,
+        peak_power_w=float(data_cfg["peak_power_w"]),
+        floor_w=float(data_cfg["clear_sky_floor_w"]),
+    ).to_numpy(dtype=np.float32)
+    prev_pv = np.asarray([float(_parse_jsonish(value)[-1]) for value in df["past_pv_w"]], dtype=np.float32)
+    prev_csi = prev_pv / np.clip(anchor_clear, a_min=1e-6, a_max=None)
+    target_clear = df["target_clear_sky_w"].to_numpy(dtype=np.float32)
+    if bool(data_cfg.get("use_clear_sky_index", True)):
+        pred = np.clip(prev_csi, 0.0, 1.0) * target_clear
+    else:
+        pred = prev_pv * (target_clear / np.clip(anchor_clear, a_min=1e-6, a_max=None))
+    return np.clip(pred.astype(np.float32), a_min=0.0, a_max=None)
+
+
+def _smart_persistence_metrics(dataset: SunConditionedCloudDataset, config: dict) -> dict[str, float]:
+    pred = _smart_persistence_predictions(dataset, config)
+    target = dataset.dataframe()["target_pv_w"].to_numpy(dtype=np.float32)
+    metrics = regression_metrics(pred, target)
+    metrics["n_samples"] = int(len(target))
+    return metrics
 
 
 def _select_visual_indices(pred_df: pd.DataFrame, limit: int) -> list[int]:
@@ -191,6 +233,7 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
     loader = _make_loader(dataset, batch_size=int(config["train"]["batch_size"]), num_workers=int(config["train"]["num_workers"]), shuffle=False)
     model.eval()
     use_csi = bool(config["data"].get("use_clear_sky_index", True))
+    smart_persistence_w = _smart_persistence_predictions(dataset, config)
     rows: list[dict] = []
     with torch.no_grad():
         for batch in loader:
@@ -216,11 +259,13 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
                         "q10_w": float(pred_w[i, 0]),
                         "q50_w": float(pred_w[i, 1]),
                         "q90_w": float(pred_w[i, 2]),
+                        "smart_persistence_w": float(smart_persistence_w[int(meta_idx[i])]),
                         "sample_index": int(meta_idx[i]),
                     }
                 )
     pred_df = pd.DataFrame(rows).sort_values("ts_target").reset_index(drop=True)
     metrics = regression_metrics(pred_df["q50_w"].to_numpy(dtype=np.float32), pred_df["target_pv_w"].to_numpy(dtype=np.float32))
+    metrics["n_samples"] = int(len(pred_df))
     return pred_df, metrics
 
 
@@ -248,6 +293,20 @@ def train_model(config: dict) -> Path:
         for split in ("train", "val", "test")
     }
     logger.info("Dataset sizes train=%d val=%d test=%d", len(datasets["train"]), len(datasets["val"]), len(datasets["test"]))
+    for split_name, split_ds in datasets.items():
+        valid_masks, total_masks = split_ds.cloud_mask_coverage()
+        logger.info("Cloud-mask coverage %s=%d/%d", split_name, valid_masks, total_masks)
+        if split_name == "train" and float(config["loss"].get("cloud_mask_weight", 0.0)) > 0.0 and valid_masks == 0:
+            logger.warning(
+                "cloud_mask_weight is > 0 but no train samples matched cloud masks. "
+                "Check data.cloud_mask_manifest_path and image path roots."
+            )
+    persistence_by_split = {split_name: _persistence_metrics(split_ds) for split_name, split_ds in datasets.items()}
+    smart_persistence_by_split = {split_name: _smart_persistence_metrics(split_ds, config) for split_name, split_ds in datasets.items()}
+    for split_name, metrics in persistence_by_split.items():
+        logger.info("Persistence baseline %s mae=%.2f rmse=%.2f", split_name, metrics["mae"], metrics["rmse"])
+    for split_name, metrics in smart_persistence_by_split.items():
+        logger.info("Smart persistence baseline %s mae=%.2f rmse=%.2f", split_name, metrics["mae"], metrics["rmse"])
 
     train_loader = _make_loader(datasets["train"], batch_size=int(config["train"]["batch_size"]), num_workers=int(config["train"]["num_workers"]), shuffle=True)
     model = SunConditionedStochasticCloudModel(config["model"]).to(device)
@@ -315,6 +374,14 @@ def train_model(config: dict) -> Path:
             "train_rmse_w": float(train_metrics["rmse"]),
             "val_mae_w": float(val_metrics["mae"]),
             "val_rmse_w": float(val_metrics["rmse"]),
+            "train_persistence_mae_w": float(persistence_by_split["train"]["mae"]),
+            "train_persistence_rmse_w": float(persistence_by_split["train"]["rmse"]),
+            "val_persistence_mae_w": float(persistence_by_split["val"]["mae"]),
+            "val_persistence_rmse_w": float(persistence_by_split["val"]["rmse"]),
+            "train_smart_persistence_mae_w": float(smart_persistence_by_split["train"]["mae"]),
+            "train_smart_persistence_rmse_w": float(smart_persistence_by_split["train"]["rmse"]),
+            "val_smart_persistence_mae_w": float(smart_persistence_by_split["val"]["mae"]),
+            "val_smart_persistence_rmse_w": float(smart_persistence_by_split["val"]["rmse"]),
             "lr": float(scheduler.get_last_lr()[0]),
         }
         history.append(row)
@@ -344,6 +411,13 @@ def train_model(config: dict) -> Path:
     for split_name, split_ds in datasets.items():
         pred_df, metrics = _evaluate_split(model, split_ds, config, device)
         pred_df.to_csv(run_dir / f"predictions_{split_name}.csv", index=False)
+        metrics = {
+            **metrics,
+            "persistence_mae": float(persistence_by_split[split_name]["mae"]),
+            "persistence_rmse": float(persistence_by_split[split_name]["rmse"]),
+            "smart_persistence_mae": float(smart_persistence_by_split[split_name]["mae"]),
+            "smart_persistence_rmse": float(smart_persistence_by_split[split_name]["rmse"]),
+        }
         save_json(run_dir / f"metrics_{split_name}.json", metrics)
         if not pred_df.empty:
             save_forecast_band_plot(pred_df.head(200), run_dir / "figures" / f"forecast_band_{split_name}.png", f"{split_name} forecast band")

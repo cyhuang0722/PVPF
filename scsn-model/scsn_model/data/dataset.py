@@ -14,6 +14,7 @@ from .cloud_mask_supervision import CloudMaskSupervisor
 
 
 def load_mask(mask_path: str | Path, size: tuple[int, int]) -> np.ndarray:
+    mask_path = resolve_existing_path(mask_path)
     mask = Image.open(mask_path).convert("L").resize((size[1], size[0]), resample=Image.NEAREST)
     arr = (np.asarray(mask, dtype=np.float32) / 255.0 >= 0.5).astype(np.float32)
     return arr[None, ...]
@@ -63,19 +64,20 @@ class SunConditionedCloudDataset(Dataset):
         cloud_mask_manifest_path: str | Path | None = None,
         cloud_mask_sky_mask_path: str | Path | None = None,
     ) -> None:
-        self.df = pd.read_csv(csv_path)
+        self.df = pd.read_csv(resolve_existing_path(csv_path))
         self.df["ts_anchor"] = pd.to_datetime(self.df["ts_anchor"])
         self.df["ts_target"] = pd.to_datetime(self.df["ts_target"])
         self.df = self.df[self.df["split"] == split].reset_index(drop=True)
         self.image_size = tuple(int(v) for v in image_size)
-        self.mask = load_mask(sky_mask_path, self.image_size) if sky_mask_path and Path(sky_mask_path).exists() else None
+        resolved_sky_mask_path = resolve_existing_path(sky_mask_path) if sky_mask_path else None
+        self.mask = load_mask(resolved_sky_mask_path, self.image_size) if resolved_sky_mask_path and resolved_sky_mask_path.exists() else None
         self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
         if self.peak_power_w <= 0:
             raise ValueError("peak_power_w must be positive.")
         self.cloud_mask_supervisor = None
         if cloud_mask_manifest_path and cloud_mask_sky_mask_path:
-            manifest_path = Path(cloud_mask_manifest_path)
-            mask_path = Path(cloud_mask_sky_mask_path)
+            manifest_path = resolve_existing_path(cloud_mask_manifest_path)
+            mask_path = resolve_existing_path(cloud_mask_sky_mask_path)
             if manifest_path.exists() and mask_path.exists():
                 self.cloud_mask_supervisor = CloudMaskSupervisor(
                     manifest_path=manifest_path,
@@ -145,6 +147,17 @@ class SunConditionedCloudDataset(Dataset):
 
     def dataframe(self) -> pd.DataFrame:
         return self.df.copy()
+
+    def cloud_mask_coverage(self) -> tuple[int, int]:
+        if self.cloud_mask_supervisor is None:
+            return 0, len(self.df)
+        keys = set(self.cloud_mask_supervisor.available_keys())
+        valid = 0
+        for row in self.df.itertuples(index=False):
+            img_paths = _parse_jsonish(row.img_paths)
+            if Path(str(img_paths[-1])).name in keys:
+                valid += 1
+        return valid, len(self.df)
 
     def _build_input_channels(self, frames: np.ndarray, sun_xy: np.ndarray) -> np.ndarray:
         seq_len, _, height, width = frames.shape
