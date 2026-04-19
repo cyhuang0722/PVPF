@@ -22,9 +22,10 @@
 - 输出配对结果和统计表到 `cloud_seg/outputs_final/manifests/`，不生成 `.npz` 文件。
 - 每次运行会清空旧的 `outputs_final/review_pngs` 和 `outputs_final/manifests`，避免旧结果残留。
 - 默认只处理 20 个满足条件的 cloudy days；加 `--all` 会处理所有满足条件的 cloudy days。
+- 默认每个 cloudy day 每个小时只配一张代表图；加 `--all-images` 会给所选 cloudy days 的每张图都生成 manifest pair。
 
 运行：
 
 ```bash
-python /home/chuangbn/projects/PVPF/cloud_seg/run_diff_experiment.py --all
+python /home/chuangbn/projects/PVPF/cloud_seg/run_diff_experiment.py --all --all-images
 ```

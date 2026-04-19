@@ -25,32 +25,16 @@ from scipy.ndimage import binary_opening as ndi_binary_opening
 from scipy.ndimage import gaussian_filter, label
 
 
-MONTH_MAP = {
-    "Jan": 1,
-    "Feb": 2,
-    "Mar": 3,
-    "Apr": 4,
-    "May": 5,
-    "Jun": 6,
-    "Jul": 7,
-    "Aug": 8,
-    "Sep": 9,
-    "Oct": 10,
-    "Nov": 11,
-    "Dec": 12,
-}
-
-
 @dataclass(frozen=True)
 class Config:
     image_root: Path
-    weather_csv: Path
+    target_days_csv: Path
     clear_sky_csv: Path
     sky_mask_path: Path
     output_dir: Path
     image_size: int = 256
-    cloudy_label: int = 2
-    max_cloudy_days: int | None = 20
+    pair_all_images: bool = False
+    review_stride_min: int = 60
     start_hour: int = 8
     end_hour: int = 17
     diff_threshold: float = 0.05
@@ -87,24 +71,6 @@ def parse_camera_timestamp(path: Path) -> datetime | None:
     return datetime.strptime(match.group(1), "%Y%m%d%H%M%S%f")
 
 
-def infer_dataset_year(image_root: Path) -> int:
-    year_dirs = sorted([path for path in image_root.iterdir() if path.is_dir() and path.name.isdigit()])
-    if not year_dirs:
-        raise RuntimeError(f"No year directories found under {image_root}")
-    return int(year_dirs[0].name)
-
-
-def load_weather_labels(weather_csv: Path, year: int) -> pd.DataFrame:
-    weather_df = pd.read_csv(weather_csv)
-    parsed_dates = []
-    for raw in weather_df["Date"].astype(str):
-        day_str, month_str = raw.split("-")
-        parsed_dates.append(pd.Timestamp(year=year, month=MONTH_MAP[month_str], day=int(day_str)))
-    weather_df["date"] = pd.DatetimeIndex(pd.to_datetime(parsed_dates)).normalize()
-    weather_df["weather_label"] = weather_df["Weather"].astype(int)
-    return weather_df[["date", "weather_label"]].sort_values("date").reset_index(drop=True)
-
-
 def load_clear_sky_windows(clear_sky_csv: Path) -> pd.DataFrame:
     clear_df = pd.read_csv(clear_sky_csv)
     required_columns = {"date", "start_time", "end_time", "notes"}
@@ -117,7 +83,23 @@ def load_clear_sky_windows(clear_sky_csv: Path) -> pd.DataFrame:
     return clear_df.sort_values(["date", "start_dt"]).reset_index(drop=True)
 
 
-def build_manifest(image_root: Path, weather_df: pd.DataFrame) -> pd.DataFrame:
+def load_target_days(target_days_csv: Path) -> list[pd.Timestamp]:
+    day_df = pd.read_csv(target_days_csv)
+    required_columns = {"date", "is_clear_sky"}
+    missing_columns = required_columns - set(day_df.columns)
+    if missing_columns:
+        raise RuntimeError(f"{target_days_csv} is missing columns: {sorted(missing_columns)}")
+
+    clear_flag = day_df["is_clear_sky"]
+    if clear_flag.dtype != bool:
+        clear_flag = clear_flag.astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
+    target_days = pd.to_datetime(day_df.loc[~clear_flag, "date"]).dt.normalize().drop_duplicates().sort_values().tolist()
+    if not target_days:
+        raise RuntimeError(f"No rows with is_clear_sky=false found in {target_days_csv}")
+    return target_days
+
+
+def build_manifest(image_root: Path) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for path in sorted(image_root.rglob("*.jpg")):
         ts = parse_camera_timestamp(path)
@@ -133,10 +115,7 @@ def build_manifest(image_root: Path, weather_df: pd.DataFrame) -> pd.DataFrame:
         )
     if not rows:
         raise RuntimeError(f"No camera images found under {image_root}")
-    manifest = pd.DataFrame.from_records(rows).sort_values("timestamp").reset_index(drop=True)
-    manifest = manifest.merge(weather_df, on="date", how="left")
-    manifest["weather_label"] = manifest["weather_label"].fillna(-1).astype(int)
-    return manifest
+    return pd.DataFrame.from_records(rows).sort_values("timestamp").reset_index(drop=True)
 
 
 def load_rgb_image(path: Path, image_size: int) -> np.ndarray:
@@ -390,22 +369,39 @@ def assert_reference_within_window(pair_df: pd.DataFrame) -> None:
         )
 
 
-def build_day_pair_table(manifest: pd.DataFrame, clear_windows: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+def build_day_pair_table(
+    manifest: pd.DataFrame,
+    clear_windows: pd.DataFrame,
+    target_days: list[pd.Timestamp],
+    cfg: Config,
+) -> pd.DataFrame:
     hourly_range = list(range(cfg.start_hour, cfg.end_hour + 1))
-    weather_by_date = manifest[["date", "weather_label"]].drop_duplicates().sort_values("date")
-    cloudy_days = weather_by_date[weather_by_date["weather_label"] == cfg.cloudy_label]["date"].tolist()
     paired_rows: list[dict[str, object]] = []
-    selected_days = 0
 
-    for cloudy_day in cloudy_days:
+    for cloudy_day in target_days:
         cloudy_df = manifest[manifest["date"] == cloudy_day].copy()
+        if cloudy_df.empty:
+            continue
 
         hour_rows: list[dict[str, object]] = []
+        references_by_hour: dict[int, tuple[pd.Series, pd.Series]] = {}
+        valid_day = True
         for hour in hourly_range:
-            cloudy_row = nearest_row_for_hour(cloudy_df, hour)
             reference = find_reference_for_hour(manifest, clear_windows, cloudy_day, hour)
-            if cloudy_row is None or reference is None:
-                hour_rows = []
+            if reference is None:
+                valid_day = False
+                break
+            references_by_hour[hour] = reference
+
+            if cfg.pair_all_images:
+                if cloudy_df[cloudy_df["hour"] == hour].empty:
+                    valid_day = False
+                    break
+                continue
+
+            cloudy_row = nearest_row_for_hour(cloudy_df, hour)
+            if cloudy_row is None:
+                valid_day = False
                 break
             clear_row, clear_window = reference
             hour_rows.append(
@@ -422,15 +418,30 @@ def build_day_pair_table(manifest: pd.DataFrame, clear_windows: pd.DataFrame, cf
                     "clear_image_path": clear_row["image_path"],
                 }
             )
-        if not hour_rows:
+        if cfg.pair_all_images and valid_day:
+            candidate_df = cloudy_df[cloudy_df["hour"].isin(hourly_range)].sort_values("timestamp")
+            for cloudy_row in candidate_df.itertuples(index=False):
+                clear_row, clear_window = references_by_hour[int(cloudy_row.hour)]
+                hour_rows.append(
+                    {
+                        "cloudy_date": pd.Timestamp(cloudy_day).strftime("%Y-%m-%d"),
+                        "clear_date": pd.Timestamp(clear_window["date"]).strftime("%Y-%m-%d"),
+                        "clear_window_start": pd.Timestamp(clear_window["start_dt"]).strftime("%Y-%m-%d %H:%M:%S"),
+                        "clear_window_end": pd.Timestamp(clear_window["end_dt"]).strftime("%Y-%m-%d %H:%M:%S"),
+                        "clear_window_notes": clear_window["notes"],
+                        "hour": int(cloudy_row.hour),
+                        "cloudy_timestamp": pd.Timestamp(cloudy_row.timestamp).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                        "clear_timestamp": pd.Timestamp(clear_row["timestamp"]).strftime("%Y-%m-%d %H:%M:%S.%f"),
+                        "cloudy_image_path": cloudy_row.image_path,
+                        "clear_image_path": clear_row["image_path"],
+                    }
+                )
+        if not valid_day or not hour_rows:
             continue
         paired_rows.extend(hour_rows)
-        selected_days += 1
-        if cfg.max_cloudy_days is not None and selected_days >= cfg.max_cloudy_days:
-            break
 
     if not paired_rows:
-        raise RuntimeError("No cloudy/clear day pairs satisfy the hourly requirements.")
+        raise RuntimeError("No target/clear day pairs satisfy the hourly requirements.")
     pair_df = pd.DataFrame.from_records(paired_rows)
     assert_reference_within_window(pair_df)
     return pair_df
@@ -484,6 +495,17 @@ def save_pair_figure(
     plt.close(fig)
 
 
+def should_save_review_png(timestamp: str, cfg: Config) -> bool:
+    stride = int(cfg.review_stride_min)
+    if stride <= 0:
+        return False
+    if not cfg.pair_all_images:
+        return True
+    ts = pd.Timestamp(timestamp)
+    minute_of_day = int(ts.hour) * 60 + int(ts.minute)
+    return minute_of_day % stride == 0
+
+
 def main() -> None:
     default_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Run clear-sky difference cloud-mask experiment.")
@@ -497,40 +519,51 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="Output directory. Defaults to ROOT/cloud_seg/outputs_final.",
+        help="Output directory. Defaults to ROOT/data/cloud_mask_ref.",
     )
     parser.add_argument(
-        "--all",
-        "--all-cloudy-days",
-        action="store_true",
-        dest="all_cloudy_days",
-        help="Process every cloudy day that satisfies the hourly pairing requirements.",
+        "--mode",
+        choices=["hourly", "full"],
+        default="hourly",
+        help="hourly: one validation sample per hour. full: every daytime image on all target days.",
     )
     parser.add_argument(
-        "--max-cloudy-days",
+        "--target-days-csv",
+        type=Path,
+        default=None,
+        help="CSV with date,is_clear_sky columns. Defaults to ROOT/data/clear_sky_generated.csv.",
+    )
+    parser.add_argument(
+        "--clear-sky-csv",
+        type=Path,
+        default=None,
+        help="Clear-sky reference windows CSV. Defaults to ROOT/data/clear_sky.csv.",
+    )
+    parser.add_argument(
+        "--review-stride-min",
         type=int,
-        default=20,
-        help="Maximum number of qualifying cloudy days to process. Use --all to disable this limit.",
+        default=60,
+        help="Save review PNGs at this minute stride. Set 0 to skip review PNGs.",
     )
     args = parser.parse_args()
-    if args.max_cloudy_days <= 0:
-        raise ValueError("--max-cloudy-days must be positive. Use --all to process every qualifying day.")
+    if args.review_stride_min < 0:
+        raise ValueError("--review-stride-min must be non-negative.")
 
     root = args.root.resolve()
     cfg = Config(
         image_root=root / "data/camera_data/resized_256",
-        weather_csv=root / "data/weather.csv",
-        clear_sky_csv=root / "data/clear_sky.csv",
+        target_days_csv=args.target_days_csv.resolve() if args.target_days_csv is not None else root / "data/clear_sky_generated.csv",
+        clear_sky_csv=args.clear_sky_csv.resolve() if args.clear_sky_csv is not None else root / "data/clear_sky.csv",
         sky_mask_path=root / "data/sky_mask.png",
-        output_dir=args.output_dir.resolve() if args.output_dir is not None else root / "cloud_seg" / "outputs_final",
-        max_cloudy_days=None if args.all_cloudy_days else args.max_cloudy_days,
+        output_dir=args.output_dir.resolve() if args.output_dir is not None else root / "data" / "cloud_mask_ref",
+        pair_all_images=args.mode == "full",
+        review_stride_min=int(args.review_stride_min),
     )
     dirs = ensure_dirs(cfg.output_dir)
-    year = infer_dataset_year(cfg.image_root)
-    weather_df = load_weather_labels(cfg.weather_csv, year)
+    target_days = load_target_days(cfg.target_days_csv)
     clear_windows = load_clear_sky_windows(cfg.clear_sky_csv)
-    manifest = build_manifest(cfg.image_root, weather_df)
-    pair_df = build_day_pair_table(manifest, clear_windows, cfg)
+    manifest = build_manifest(cfg.image_root)
+    pair_df = build_day_pair_table(manifest, clear_windows, target_days, cfg)
     sky_mask = load_mask(cfg.sky_mask_path, cfg.image_size)
 
     pair_df.to_csv(dirs["manifests"] / "selected_pairs.csv", index=False)
@@ -583,28 +616,31 @@ def main() -> None:
             hourly_local_diff_p95.append(local_diff_p95)
             hourly_scale.append(clear_scale)
 
-            hour_stub = f"{row.hour:02d}00"
-            out_name = f"{cloudy_date}_{hour_stub}_ref_{row.clear_date}.png"
-            save_pair_figure(
-                dirs["review_pngs"] / out_name,
-                cloudy_rgb=cloudy_rgb,
-                clear_rgb=clear_rgb,
-                cloudy_rbr=cloudy_rbr,
-                clear_rbr_norm=clear_rbr_norm,
-                raw_diff=raw_diff,
-                trend=trend,
-                local_diff=local_diff,
-                blue_sky_mask=blue_sky_mask,
-                color_mask=color_mask,
-                rbr_raw_mask=rbr_raw_mask,
-                raw_mask=raw_mask,
-                diff_mask=diff_mask,
-                sky_mask=sky_mask,
-                title=(
-                    f"{cloudy_date} {row.hour:02d}:00 | ref {row.clear_date} | "
-                    f"{scene_type} | blue={blue_fraction:.2f} gray={gray_fraction:.2f} | tau={cfg.diff_threshold:.2f}"
-                ),
-            )
+            ts_stub = pd.Timestamp(row.cloudy_timestamp).strftime("%H%M%S")
+            out_name = f"{cloudy_date}_{ts_stub}_ref_{row.clear_date}.png"
+            png_path = ""
+            if should_save_review_png(row.cloudy_timestamp, cfg):
+                png_path = str(dirs["review_pngs"] / out_name)
+                save_pair_figure(
+                    dirs["review_pngs"] / out_name,
+                    cloudy_rgb=cloudy_rgb,
+                    clear_rgb=clear_rgb,
+                    cloudy_rbr=cloudy_rbr,
+                    clear_rbr_norm=clear_rbr_norm,
+                    raw_diff=raw_diff,
+                    trend=trend,
+                    local_diff=local_diff,
+                    blue_sky_mask=blue_sky_mask,
+                    color_mask=color_mask,
+                    rbr_raw_mask=rbr_raw_mask,
+                    raw_mask=raw_mask,
+                    diff_mask=diff_mask,
+                    sky_mask=sky_mask,
+                    title=(
+                        f"{cloudy_date} {row.hour:02d}:00 | ref {row.clear_date} | "
+                        f"{scene_type} | blue={blue_fraction:.2f} gray={gray_fraction:.2f} | tau={cfg.diff_threshold:.2f}"
+                    ),
+                )
             summary_rows.append(
                 {
                     "cloudy_date": cloudy_date,
@@ -628,7 +664,7 @@ def main() -> None:
                     "local_diff_p95": local_diff_p95,
                     "cloudy_image_path": row.cloudy_image_path,
                     "clear_image_path": row.clear_image_path,
-                    "png_path": str(dirs["review_pngs"] / out_name),
+                    "png_path": png_path,
                 }
             )
 
@@ -636,7 +672,8 @@ def main() -> None:
             {
                 "cloudy_date": cloudy_date,
                 "clear_references": clear_ref_label,
-                "n_hours": int(len(day_df)),
+                "n_pairs": int(len(day_df)),
+                "n_hours": int(day_df["hour"].nunique()),
                 "mean_raw_cloud_fraction": float(np.mean(hourly_raw_cloud_fraction)),
                 "mean_cloud_fraction": float(np.mean(hourly_cloud_fraction)),
                 "mean_raw_diff": float(np.mean(hourly_raw_diff_mean)),
@@ -651,9 +688,14 @@ def main() -> None:
 
     summary = {
         "config": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(cfg).items()},
+        "mode": "full" if cfg.pair_all_images else "hourly",
+        "target_days_csv": str(cfg.target_days_csv),
+        "clear_sky_csv": str(cfg.clear_sky_csv),
+        "n_requested_target_days": len(target_days),
         "selected_cloudy_days": [row["cloudy_date"] for row in day_rows],
         "n_cloudy_days": len(day_rows),
-        "n_hourly_pairs": len(summary_rows),
+        "n_pairs": len(summary_rows),
+        "pair_all_images": bool(cfg.pair_all_images),
         "output_dir": str(cfg.output_dir),
     }
     (dirs["base"] / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")

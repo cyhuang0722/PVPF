@@ -30,9 +30,15 @@ class PrepareSummary:
     n_pv_rows: int
     n_candidate_targets: int
     n_samples: int
+    n_samples_before_clear_sky_filter: int
+    n_excluded_clear_sky_samples: int
     n_missing_image: int
     n_missing_pv: int
     n_filtered_sun_edge: int
+    n_split_days_train: int
+    n_split_days_val: int
+    n_split_days_test: int
+    excluded_clear_sky_dates: list[str]
     image_size: tuple[int, int]
     source_image_size: tuple[int, int]
 
@@ -99,8 +105,80 @@ def load_pv_series(pv_csv: Path, timezone: str) -> pd.Series:
     return series.astype(np.float32)
 
 
-def assign_splits(df: pd.DataFrame, ratios: dict[str, float]) -> pd.DataFrame:
+def _parse_bool_series(values: pd.Series) -> pd.Series:
+    if values.dtype == bool:
+        return values.fillna(False)
+    text = values.astype(str).str.strip().str.lower()
+    return text.isin({"true", "1", "yes", "y", "t"})
+
+
+def load_clear_sky_dates(clear_sky_csv: Path | None, timezone: str) -> set[pd.Timestamp]:
+    if clear_sky_csv is None:
+        return set()
+    csv_path = resolve_project_path(clear_sky_csv, must_exist=True)
+    df = pd.read_csv(csv_path)
+    if "date" not in df.columns:
+        raise ValueError(f"Clear-sky exclusion CSV must contain a date column: {csv_path}")
+    if "is_clear_sky" in df.columns:
+        df = df[_parse_bool_series(df["is_clear_sky"])].copy()
+    dates = pd.to_datetime(df["date"], errors="coerce")
+    dates = dates.dropna()
+    if dates.empty:
+        return set()
+    if dates.dt.tz is None:
+        dates = dates.dt.tz_localize(timezone)
+    else:
+        dates = dates.dt.tz_convert(timezone)
+    return set(dates.dt.normalize())
+
+
+def filter_clear_sky_samples(
+    df: pd.DataFrame,
+    clear_sky_dates: set[pd.Timestamp],
+) -> tuple[pd.DataFrame, int]:
+    if not clear_sky_dates:
+        return df, 0
+    anchor_dates = df["ts_anchor"].dt.normalize()
+    target_dates = df["ts_target"].dt.normalize()
+    keep = ~(anchor_dates.isin(clear_sky_dates) | target_dates.isin(clear_sky_dates))
+    excluded = int((~keep).sum())
+    return df.loc[keep].reset_index(drop=True), excluded
+
+
+def _day_split_counts(n_days: int, ratios: dict[str, float]) -> tuple[int, int, int]:
+    if n_days <= 0:
+        return 0, 0, 0
+    if n_days == 1:
+        return 1, 0, 0
+    if n_days == 2:
+        return 1, 0, 1
+
+    n_train = int(n_days * float(ratios["train"]))
+    n_val = int(n_days * float(ratios["val"]))
+    n_train = max(1, n_train)
+    n_val = max(1, n_val) if float(ratios.get("val", 0.0)) > 0 else 0
+    if n_train + n_val >= n_days:
+        n_val = max(0, min(n_val, n_days - n_train - 1))
+    if n_train + n_val >= n_days:
+        n_train = max(1, n_days - n_val - 1)
+    return n_train, n_val, n_days - n_train - n_val
+
+
+def assign_splits(df: pd.DataFrame, ratios: dict[str, float], *, by_day: bool = False) -> pd.DataFrame:
     df = df.sort_values("ts_target").reset_index(drop=True).copy()
+    df["sample_date"] = df["ts_target"].dt.date.astype(str)
+    if by_day:
+        days = pd.Index(sorted(df["ts_target"].dt.normalize().unique()))
+        n_train_days, n_val_days, _ = _day_split_counts(len(days), ratios)
+        train_days = set(days[:n_train_days])
+        val_days = set(days[n_train_days : n_train_days + n_val_days])
+        split = np.array(["test"] * len(df), dtype=object)
+        target_days = df["ts_target"].dt.normalize()
+        split[target_days.isin(train_days).to_numpy()] = "train"
+        split[target_days.isin(val_days).to_numpy()] = "val"
+        df["split"] = split
+        return df
+
     n = len(df)
     n_train = int(n * ratios["train"])
     n_val = int(n * ratios["val"])
@@ -300,16 +378,44 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
         raise RuntimeError("No valid samples were built. Please check camera/PV coverage and tolerances.")
     df["ts_anchor"] = pd.to_datetime(df["ts_anchor"])
     df["ts_target"] = pd.to_datetime(df["ts_target"])
-    df = assign_splits(df, data_cfg["chronological_split"])
+    n_samples_before_clear_sky_filter = int(len(df))
+    exclude_clear_sky_days = bool(data_cfg.get("exclude_clear_sky_days", False))
+    if exclude_clear_sky_days and not data_cfg.get("clear_sky_exclusion_csv"):
+        raise ValueError("data.exclude_clear_sky_days is true, but data.clear_sky_exclusion_csv is not set.")
+    clear_sky_dates = (
+        load_clear_sky_dates(data_cfg.get("clear_sky_exclusion_csv"), timezone)
+        if exclude_clear_sky_days
+        else set()
+    )
+    if exclude_clear_sky_days:
+        df, n_excluded_clear_sky_samples = filter_clear_sky_samples(df, clear_sky_dates)
+        if df.empty:
+            raise RuntimeError("No valid samples remain after clear-sky day exclusion.")
+    else:
+        n_excluded_clear_sky_samples = 0
+    df = assign_splits(
+        df,
+        data_cfg["chronological_split"],
+        by_day=bool(data_cfg.get("split_by_day", False)),
+    )
+    split_day_counts = (
+        df.groupby("split")["sample_date"].nunique().reindex(["train", "val", "test"], fill_value=0).astype(int)
+    )
 
     summary = PrepareSummary(
         n_images_indexed=int(len(camera_df)),
         n_pv_rows=int(len(pv_series)),
         n_candidate_targets=int(len(target_times)),
         n_samples=int(len(df)),
+        n_samples_before_clear_sky_filter=n_samples_before_clear_sky_filter,
+        n_excluded_clear_sky_samples=int(n_excluded_clear_sky_samples),
         n_missing_image=int(missing_image),
         n_missing_pv=int(missing_pv),
         n_filtered_sun_edge=int(filtered_sun_edge),
+        n_split_days_train=int(split_day_counts["train"]),
+        n_split_days_val=int(split_day_counts["val"]),
+        n_split_days_test=int(split_day_counts["test"]),
+        excluded_clear_sky_dates=sorted(ts.date().isoformat() for ts in clear_sky_dates),
         image_size=(dst_h, dst_w),
         source_image_size=(source_h, source_w),
     )
@@ -329,14 +435,25 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "n_pv_rows": summary.n_pv_rows,
             "n_candidate_targets": summary.n_candidate_targets,
             "n_samples": summary.n_samples,
+            "n_samples_before_clear_sky_filter": summary.n_samples_before_clear_sky_filter,
+            "n_excluded_clear_sky_samples": summary.n_excluded_clear_sky_samples,
             "n_missing_image": summary.n_missing_image,
             "n_missing_pv": summary.n_missing_pv,
             "n_filtered_sun_edge": summary.n_filtered_sun_edge,
+            "n_split_days_train": summary.n_split_days_train,
+            "n_split_days_val": summary.n_split_days_val,
+            "n_split_days_test": summary.n_split_days_test,
+            "excluded_clear_sky_dates": summary.excluded_clear_sky_dates,
             "image_size": list(summary.image_size),
             "source_image_size": list(summary.source_image_size),
             "sample_hour_start": int(config["data"].get("sample_hour_start", 8)),
             "sample_hour_end": int(config["data"].get("sample_hour_end", 17)),
             "drop_zero_input_samples": bool(config["data"].get("drop_zero_input_samples", True)),
+            "exclude_clear_sky_days": bool(config["data"].get("exclude_clear_sky_days", False)),
+            "clear_sky_exclusion_csv": str(resolve_project_path(config["data"]["clear_sky_exclusion_csv"], must_exist=False))
+            if config["data"].get("clear_sky_exclusion_csv")
+            else None,
+            "split_by_day": bool(config["data"].get("split_by_day", False)),
             "samples_csv": str(samples_csv),
         },
     )
