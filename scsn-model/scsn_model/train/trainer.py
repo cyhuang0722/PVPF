@@ -192,18 +192,32 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
             cloud_fraction_loss = (torch.abs(pred_fraction - target_fraction) * valid.view(-1)).sum() / valid_count
             cloud_mask_loss = cloud_pixel_loss + float(loss_cfg.get("cloud_fraction_weight", 0.25)) * cloud_fraction_loss
 
+    future_hotspot_loss = current_cloud_prob.new_zeros(())
+    if "future_rbr_change_hotspot" in data and "future_hotspot_valid" in data:
+        valid = data["future_hotspot_valid"].view(-1, 1, 1, 1)
+        if torch.any(valid > 0):
+            pred_hotspot = output.get("future_motion_hotspot_15min", output["future_motion_hotspot_maps"].mean(dim=1))
+            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], pred_hotspot).clamp(0.0, 1.0)
+            attention = output["attention_map"].detach()
+            attention_scale = attention.flatten(1).amax(dim=1).view(-1, 1, 1, 1).clamp_min(1e-6)
+            attention_weight = 1.0 + float(loss_cfg.get("future_hotspot_sun_weight", 2.0)) * (attention / attention_scale)
+            per_sample = (torch.abs(pred_hotspot - target_hotspot) * attention_weight).mean(dim=(1, 2, 3))
+            future_hotspot_loss = (per_sample * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+
     return {
         "opacity_proxy": opacity_proxy_loss,
         "gap_proxy": gap_proxy_loss,
         "transmission_proxy": transmission_proxy_loss,
         "motion_warp": motion_warp_loss,
         "cloud_mask": cloud_mask_loss,
+        "future_hotspot": future_hotspot_loss,
         "total": (
             float(loss_cfg.get("opacity_proxy_weight", 0.15)) * opacity_proxy_loss
             + float(loss_cfg.get("gap_proxy_weight", 0.10)) * gap_proxy_loss
             + float(loss_cfg.get("transmission_proxy_weight", 0.15)) * transmission_proxy_loss
             + float(loss_cfg.get("motion_warp_weight", 0.10)) * motion_warp_loss
             + float(loss_cfg.get("cloud_mask_weight", 0.0)) * cloud_mask_loss
+            + float(loss_cfg.get("future_hotspot_weight", 0.0)) * future_hotspot_loss
         ),
     }
 
@@ -219,12 +233,15 @@ def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunCo
         "image": batch["images"][0, -1, :3].detach().cpu().numpy(),
         "attention": out["attention_map"][0, 0].detach().cpu().numpy(),
         "current_cloud_prob": out["current_cloud_prob"][0, 0].detach().cpu().numpy(),
-        "future_cloud_prob": out["future_cloud_prob_maps"][0, -1, 0].detach().cpu().numpy(),
+        "future_cloud_prob": out["future_cloud_prob_15min"][0, 0].detach().cpu().numpy(),
         "future_sun_cloud_prob": out["future_sun_cloud_prob"][0].detach().cpu().numpy(),
         "cloud_mask": batch["cloud_mask"][0, 0].detach().cpu().numpy(),
         "cloud_mask_valid": bool(batch["cloud_mask_valid"][0].detach().cpu().item() > 0.0),
-        "motion_hotspot": out["future_motion_hotspot_maps"][0, -1, 0].detach().cpu().numpy(),
-        "future_cloud_uncertainty": out["future_cloud_uncertainty_maps"][0, -1, 0].detach().cpu().numpy(),
+        "motion_hotspot": out["future_motion_hotspot_15min"][0, 0].detach().cpu().numpy(),
+        "future_cloud_uncertainty": out["future_cloud_uncertainty_15min"][0, 0].detach().cpu().numpy(),
+        "past_rbr_change_hotspot": batch["past_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
+        "future_rbr_change_hotspot": batch["future_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
+        "future_hotspot_valid": bool(batch["future_hotspot_valid"][0].detach().cpu().item() > 0.0),
         "title": str(frame["ts_target"]),
     }
 
@@ -244,6 +261,18 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
             pred_w = _target_to_w(pred, clear_sky_w[:, None], use_csi)
             target_w = data["target_pv_w"].cpu().numpy()
             meta_idx = data["meta_index"].cpu().numpy()
+            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], out["future_motion_hotspot_15min"]).clamp(0.0, 1.0)
+            pred_hotspot = out["future_motion_hotspot_15min"].clamp(0.0, 1.0)
+            hotspot_l1 = torch.abs(pred_hotspot - target_hotspot).mean(dim=(1, 2, 3)).cpu().numpy()
+            pred_flat = pred_hotspot.flatten(1)
+            target_flat = target_hotspot.flatten(1)
+            pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
+            target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
+            hotspot_corr = (
+                (pred_centered * target_centered).mean(dim=1)
+                / (pred_centered.std(dim=1).clamp_min(1e-6) * target_centered.std(dim=1).clamp_min(1e-6))
+            ).cpu().numpy()
+            hotspot_valid = data["future_hotspot_valid"].cpu().numpy()
             for i in range(len(meta_idx)):
                 frame = dataset.df.iloc[int(meta_idx[i])]
                 rows.append(
@@ -260,12 +289,16 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
                         "q50_w": float(pred_w[i, 1]),
                         "q90_w": float(pred_w[i, 2]),
                         "smart_persistence_w": float(smart_persistence_w[int(meta_idx[i])]),
+                        "future_hotspot_l1": float(hotspot_l1[i]) if float(hotspot_valid[i]) > 0 else np.nan,
+                        "future_hotspot_corr": float(hotspot_corr[i]) if float(hotspot_valid[i]) > 0 else np.nan,
                         "sample_index": int(meta_idx[i]),
                     }
                 )
     pred_df = pd.DataFrame(rows).sort_values("ts_target").reset_index(drop=True)
     metrics = regression_metrics(pred_df["q50_w"].to_numpy(dtype=np.float32), pred_df["target_pv_w"].to_numpy(dtype=np.float32))
     metrics["n_samples"] = int(len(pred_df))
+    metrics["future_hotspot_l1"] = float(pred_df["future_hotspot_l1"].mean()) if "future_hotspot_l1" in pred_df else float("nan")
+    metrics["future_hotspot_corr"] = float(pred_df["future_hotspot_corr"].mean()) if "future_hotspot_corr" in pred_df else float("nan")
     return pred_df, metrics
 
 
@@ -333,7 +366,7 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "opacity_proxy": [], "gap_proxy": [], "transmission_proxy": [], "motion_warp": [], "cloud_mask": []}
+        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "opacity_proxy": [], "gap_proxy": [], "transmission_proxy": [], "motion_warp": [], "cloud_mask": [], "future_hotspot": []}
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -381,6 +414,7 @@ def train_model(config: dict) -> Path:
             "train_transmission_proxy_loss": float(np.mean(epoch_stats["transmission_proxy"])),
             "train_motion_warp_loss": float(np.mean(epoch_stats["motion_warp"])),
             "train_cloud_mask_loss": float(np.mean(epoch_stats["cloud_mask"])),
+            "train_future_hotspot_loss": float(np.mean(epoch_stats["future_hotspot"])),
             "train_mae_w": float(train_metrics["mae"]),
             "train_rmse_w": float(train_metrics["rmse"]),
             "val_mae_w": float(val_metrics["mae"]),
@@ -440,11 +474,14 @@ def train_model(config: dict) -> Path:
                 current_cloud_prob=item["current_cloud_prob"],
                 future_cloud_prob=item["future_cloud_prob"],
                 motion_hotspot=item["motion_hotspot"],
+                past_rbr_change_hotspot=item["past_rbr_change_hotspot"],
+                future_rbr_change_hotspot=item["future_rbr_change_hotspot"],
                 future_sun_cloud_prob=item["future_sun_cloud_prob"],
                 out_path=run_dir / "figures" / f"cloud_state_{split_name}_{idx:02d}.png",
                 title=str(item["title"]),
                 cloud_mask=item["cloud_mask"],
                 cloud_mask_valid=bool(item["cloud_mask_valid"]),
+                future_hotspot_valid=bool(item["future_hotspot_valid"]),
                 future_cloud_uncertainty=item["future_cloud_uncertainty"],
             )
     return run_dir

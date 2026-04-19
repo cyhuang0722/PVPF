@@ -39,6 +39,8 @@ def resolve_existing_path(path: str | Path) -> Path:
 def _parse_jsonish(value: object) -> list[float] | list[str]:
     if isinstance(value, list):
         return value
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return []
     if not isinstance(value, str):
         raise TypeError(f"Unsupported sequence payload: {type(value)!r}")
     try:
@@ -90,6 +92,7 @@ class SunConditionedCloudDataset(Dataset):
     def __getitem__(self, index: int) -> dict:
         row = self.df.iloc[index]
         img_paths = _parse_jsonish(row["img_paths"])
+        future_img_paths = _parse_jsonish(row.get("future_img_paths", []))
         past_pv = np.asarray(_parse_jsonish(row["past_pv_w"]), dtype=np.float32)
         solar_vec = np.asarray(_parse_jsonish(row["solar_vec"]), dtype=np.float32)
 
@@ -105,11 +108,20 @@ class SunConditionedCloudDataset(Dataset):
         frames = np.stack([load_rgb_image(p, self.image_size) for p in img_paths], axis=0)
         if self.mask is not None:
             frames = frames * self.mask
+        future_frames = None
+        future_hotspot_valid = 0.0
+        if future_img_paths:
+            future_frames = np.stack([load_rgb_image(p, self.image_size) for p in future_img_paths], axis=0)
+            if self.mask is not None:
+                future_frames = future_frames * self.mask
+            future_hotspot_valid = 1.0
         cloud_mask, cloud_mask_valid = self._load_cloud_mask(img_paths[-1])
 
         input_frames = self._build_input_channels(frames=frames, sun_xy=current_sun_xy)
         target_rbr = input_frames[-1, 3:4]
         prev_rbr = input_frames[-2, 3:4] if input_frames.shape[0] > 1 else target_rbr.copy()
+        past_rbr_change_hotspot = self._rbr_change_hotspot(frames)
+        future_rbr_change_seq, future_rbr_change_hotspot = self._future_rbr_change_hotspot(frames[-1:], future_frames)
         opacity_proxy, gap_proxy, transmission_proxy = self._build_state_proxies(frames[-1], target_rbr, target_sun_xy)
 
         azimuth_rad = np.deg2rad(float(row["azimuth_deg"]))
@@ -136,6 +148,10 @@ class SunConditionedCloudDataset(Dataset):
             "target_sun_xy": torch.tensor(target_sun_xy, dtype=torch.float32),
             "target_rbr": torch.from_numpy(target_rbr.astype(np.float32)),
             "prev_rbr": torch.from_numpy(prev_rbr.astype(np.float32)),
+            "past_rbr_change_hotspot": torch.from_numpy(past_rbr_change_hotspot.astype(np.float32)),
+            "future_rbr_change_hotspot": torch.from_numpy(future_rbr_change_hotspot.astype(np.float32)),
+            "future_rbr_change_seq": torch.from_numpy(future_rbr_change_seq.astype(np.float32)),
+            "future_hotspot_valid": torch.tensor(future_hotspot_valid, dtype=torch.float32),
             "opacity_proxy": torch.from_numpy(opacity_proxy.astype(np.float32)),
             "gap_proxy": torch.from_numpy(gap_proxy.astype(np.float32)),
             "transmission_proxy": torch.from_numpy(transmission_proxy.astype(np.float32)),
@@ -164,9 +180,44 @@ class SunConditionedCloudDataset(Dataset):
         sun_distance = self._sun_distance_map(sun_xy=sun_xy, height=height, width=width)
         repeated_mask = np.repeat(mask[None, ...], seq_len, axis=0)
         repeated_distance = np.repeat(sun_distance[None, ...], seq_len, axis=0)
-        rbr = frames[:, 0:1] / np.clip(frames[:, 2:3], a_min=1e-3, a_max=None)
-        rbr = np.clip(rbr, 0.0, 4.0) / 4.0
+        rbr = self._build_rbr(frames)
         return np.concatenate([frames, rbr, repeated_distance, repeated_mask], axis=1)
+
+    @staticmethod
+    def _build_rbr(frames: np.ndarray) -> np.ndarray:
+        rbr = frames[:, 0:1] / np.clip(frames[:, 2:3], a_min=1e-3, a_max=None)
+        return np.clip(rbr, 0.0, 4.0) / 4.0
+
+    def _rbr_change_hotspot(self, frames: np.ndarray) -> np.ndarray:
+        rbr = self._build_rbr(frames)
+        if rbr.shape[0] <= 1:
+            hotspot = np.zeros_like(rbr[0])
+        else:
+            hotspot = np.mean(np.abs(rbr[1:] - rbr[:-1]), axis=0)
+        return self._normalize_hotspot(hotspot)
+
+    def _future_rbr_change_hotspot(
+        self,
+        current_frame: np.ndarray,
+        future_frames: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if future_frames is None or future_frames.size == 0:
+            seq = np.zeros((1, 1, self.image_size[0], self.image_size[1]), dtype=np.float32)
+            return seq, seq[0]
+        all_frames = np.concatenate([current_frame, future_frames], axis=0)
+        rbr = self._build_rbr(all_frames)
+        seq = np.abs(rbr[1:] - rbr[:-1])
+        seq = np.stack([self._normalize_hotspot(step) for step in seq], axis=0)
+        return seq.astype(np.float32), np.mean(seq, axis=0).astype(np.float32)
+
+    def _normalize_hotspot(self, hotspot: np.ndarray) -> np.ndarray:
+        hotspot = np.asarray(hotspot, dtype=np.float32)
+        if self.mask is not None:
+            hotspot = hotspot * self.mask
+        scale = float(np.percentile(hotspot, 95))
+        if scale <= 1e-6:
+            return np.zeros_like(hotspot, dtype=np.float32)
+        return np.clip(hotspot / scale, 0.0, 1.0).astype(np.float32)
 
     @staticmethod
     def _sun_distance_map(sun_xy: np.ndarray, height: int, width: int) -> np.ndarray:

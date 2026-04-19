@@ -33,6 +33,7 @@ class PrepareSummary:
     n_samples_before_clear_sky_filter: int
     n_excluded_clear_sky_samples: int
     n_missing_image: int
+    n_missing_future_image: int
     n_missing_pv: int
     n_filtered_sun_edge: int
     n_split_days_train: int
@@ -228,6 +229,10 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
     data_cfg = config["data"]
     timezone = data_cfg["timezone"]
     sequence_offsets = data_cfg["sequence_offsets_min"]
+    future_image_offsets = data_cfg.get(
+        "future_image_offsets_min",
+        list(range(1, int(config.get("model", {}).get("future_steps", 15)) + 1)),
+    )
     past_pv_offsets = data_cfg["past_pv_offsets_min"]
     target_offset = int(data_cfg["target_offset_min"])
     tolerance_sec = float(data_cfg["image_match_tolerance_sec"])
@@ -274,6 +279,7 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
 
     rows: list[dict] = []
     missing_image = 0
+    missing_future_image = 0
     missing_pv = 0
     filtered_sun_edge = 0
 
@@ -310,6 +316,11 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
         if img_paths is None:
             missing_image += 1
             continue
+        future_img_times = [anchor_ts + pd.Timedelta(minutes=o) for o in future_image_offsets]
+        future_img_paths = _nearest_image_paths(future_img_times, camera_df, tolerance_sec)
+        if future_img_paths is None:
+            missing_future_image += 1
+            continue
 
         target_solar = solar_lookup.loc[target_ts]
         sun_x, sun_y = project_sun_to_image(
@@ -330,6 +341,17 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
             zenith_deg=float(anchor_solar["zenith_deg"]),
             image_width=dst_w,
             image_height=dst_h,
+        )
+        target_sun_x, target_sun_y = project_sun_to_image(
+            azimuth_deg=float(target_solar["azimuth_deg"]),
+            zenith_deg=float(target_solar["zenith_deg"]),
+            calib=calib,
+            image_width=dst_w,
+            image_height=dst_h,
+            azimuth_offset_deg=float(data_cfg.get("azimuth_offset_deg", 0.0)),
+            azimuth_clockwise=bool(data_cfg.get("azimuth_clockwise", True)),
+            image_offset_x_px=float(data_cfg.get("sun_image_offset_x_px", 0.0)),
+            image_offset_y_px=float(data_cfg.get("sun_image_offset_y_px", 0.0)),
         )
         min_edge_margin = min(
             float(np.asarray(sun_x).item()),
@@ -358,6 +380,7 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
                 "ts_anchor": anchor_ts.isoformat(),
                 "ts_target": target_ts.isoformat(),
                 "img_paths": json.dumps(img_paths, ensure_ascii=False),
+                "future_img_paths": json.dumps(future_img_paths, ensure_ascii=False),
                 "past_pv_w": json.dumps(past_pv),
                 "target_pv_w": target_pv_w,
                 "target_clear_sky_w": clear_target_w,
@@ -366,6 +389,8 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
                 "solar_vec": json.dumps(solar_vec.tolist()),
                 "sun_x_px": float(np.asarray(sun_x).item()),
                 "sun_y_px": float(np.asarray(sun_y).item()),
+                "target_sun_x_px": float(np.asarray(target_sun_x).item()),
+                "target_sun_y_px": float(np.asarray(target_sun_y).item()),
                 "azimuth_deg": float(anchor_solar["azimuth_deg"]),
                 "zenith_deg": float(anchor_solar["zenith_deg"]),
                 "target_azimuth_deg": float(target_solar["azimuth_deg"]),
@@ -410,6 +435,7 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
         n_samples_before_clear_sky_filter=n_samples_before_clear_sky_filter,
         n_excluded_clear_sky_samples=int(n_excluded_clear_sky_samples),
         n_missing_image=int(missing_image),
+        n_missing_future_image=int(missing_future_image),
         n_missing_pv=int(missing_pv),
         n_filtered_sun_edge=int(filtered_sun_edge),
         n_split_days_train=int(split_day_counts["train"]),
@@ -438,6 +464,7 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "n_samples_before_clear_sky_filter": summary.n_samples_before_clear_sky_filter,
             "n_excluded_clear_sky_samples": summary.n_excluded_clear_sky_samples,
             "n_missing_image": summary.n_missing_image,
+            "n_missing_future_image": summary.n_missing_future_image,
             "n_missing_pv": summary.n_missing_pv,
             "n_filtered_sun_edge": summary.n_filtered_sun_edge,
             "n_split_days_train": summary.n_split_days_train,
@@ -449,6 +476,7 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "sample_hour_start": int(config["data"].get("sample_hour_start", 8)),
             "sample_hour_end": int(config["data"].get("sample_hour_end", 17)),
             "drop_zero_input_samples": bool(config["data"].get("drop_zero_input_samples", True)),
+            "future_image_offsets_min": list(config["data"].get("future_image_offsets_min", [])),
             "exclude_clear_sky_days": bool(config["data"].get("exclude_clear_sky_days", False)),
             "clear_sky_exclusion_csv": str(resolve_project_path(config["data"]["clear_sky_exclusion_csv"], must_exist=False))
             if config["data"].get("clear_sky_exclusion_csv")

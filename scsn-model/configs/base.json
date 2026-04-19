@@ -17,6 +17,7 @@
     "split_by_day": true,
     "image_size": [256, 256],
     "sequence_offsets_min": [-15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0],
+    "future_image_offsets_min": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     "past_pv_offsets_min": [-45, -30, -15, 0],
     "target_offset_min": 15,
     "image_match_tolerance_sec": 90,
@@ -74,6 +75,8 @@
     "motion_warp_weight": 0.10,
     "cloud_mask_weight": 0.05,
     "cloud_fraction_weight": 0.25,
+    "future_hotspot_weight": 0.05,
+    "future_hotspot_sun_weight": 2.0,
     "grad_clip_norm": 5.0
   },
   "train": {
