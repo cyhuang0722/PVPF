@@ -303,12 +303,13 @@ def segment_cloud_rbr_final(
 
 
 def ensure_dirs(output_dir: Path) -> dict[str, Path]:
-    for generated_subdir in ["days", "manifests", "pairs", "review_pngs"]:
+    for generated_subdir in ["days", "manifests", "masks", "pairs", "review_pngs"]:
         stale_dir = output_dir / generated_subdir
         if stale_dir.exists():
             shutil.rmtree(stale_dir)
     dirs = {
         "base": output_dir,
+        "masks": output_dir / "masks",
         "review_pngs": output_dir / "review_pngs",
         "manifests": output_dir / "manifests",
     }
@@ -495,6 +496,11 @@ def save_pair_figure(
     plt.close(fig)
 
 
+def save_cloud_mask_png(out_path: Path, cloud_mask: np.ndarray, sky_mask: np.ndarray) -> None:
+    mask = (cloud_mask.astype(bool) & sky_mask).astype(np.uint8) * 255
+    Image.fromarray(mask, mode="L").save(out_path)
+
+
 def should_save_review_png(timestamp: str, cfg: Config) -> bool:
     stride = int(cfg.review_stride_min)
     if stride <= 0:
@@ -616,8 +622,10 @@ def main() -> None:
             hourly_local_diff_p95.append(local_diff_p95)
             hourly_scale.append(clear_scale)
 
-            ts_stub = pd.Timestamp(row.cloudy_timestamp).strftime("%H%M%S")
+            ts_stub = pd.Timestamp(row.cloudy_timestamp).strftime("%Y%m%d_%H%M%S%f")
             out_name = f"{cloudy_date}_{ts_stub}_ref_{row.clear_date}.png"
+            mask_path = dirs["masks"] / out_name
+            save_cloud_mask_png(mask_path, diff_mask, sky_mask)
             png_path = ""
             if should_save_review_png(row.cloudy_timestamp, cfg):
                 png_path = str(dirs["review_pngs"] / out_name)
@@ -664,6 +672,7 @@ def main() -> None:
                     "local_diff_p95": local_diff_p95,
                     "cloudy_image_path": row.cloudy_image_path,
                     "clear_image_path": row.clear_image_path,
+                    "cloud_mask_path": str(mask_path),
                     "png_path": png_path,
                 }
             )
@@ -695,6 +704,7 @@ def main() -> None:
         "selected_cloudy_days": [row["cloudy_date"] for row in day_rows],
         "n_cloudy_days": len(day_rows),
         "n_pairs": len(summary_rows),
+        "n_masks": len(summary_rows),
         "pair_all_images": bool(cfg.pair_all_images),
         "output_dir": str(cfg.output_dir),
     }

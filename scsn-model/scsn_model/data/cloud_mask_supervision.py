@@ -82,6 +82,15 @@ def _load_sky_mask(path: Path, image_size: int) -> np.ndarray:
         return (np.asarray(mask, dtype=np.float32) / 255.0) >= 0.5
 
 
+def _load_binary_mask(path: Path, image_size: int) -> np.ndarray:
+    path = _resolve_existing_path(path)
+    with Image.open(path) as im:
+        mask = im.convert("L")
+        if mask.size != (image_size, image_size):
+            mask = mask.resize((image_size, image_size), resample=Image.NEAREST)
+        return (np.asarray(mask, dtype=np.float32) / 255.0 >= 0.5).astype(np.float32)
+
+
 def _compute_saturation_value(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     rgb_min = np.min(rgb, axis=-1)
     rgb_max = np.max(rgb, axis=-1)
@@ -232,10 +241,14 @@ class CloudMaskSupervisor:
         missing = required - set(manifest.columns)
         if missing:
             raise ValueError(f"{self.manifest_path} is missing columns: {sorted(missing)}")
-        self._pairs = {
-            Path(row.cloudy_image_path).name: (_resolve_existing_path(row.cloudy_image_path), _resolve_existing_path(row.clear_image_path))
-            for row in manifest.itertuples(index=False)
-        }
+        self._pairs: dict[str, tuple[Path, Path]] = {}
+        self._mask_paths: dict[str, Path] = {}
+        has_precomputed_masks = "cloud_mask_path" in manifest.columns
+        for row in manifest.itertuples(index=False):
+            key = Path(row.cloudy_image_path).name
+            self._pairs[key] = (_resolve_existing_path(row.cloudy_image_path), _resolve_existing_path(row.clear_image_path))
+            if has_precomputed_masks and isinstance(row.cloud_mask_path, str) and row.cloud_mask_path:
+                self._mask_paths[key] = _resolve_existing_path(row.cloud_mask_path)
         self._cache: dict[str, np.ndarray] = {}
 
     def lookup(self, image_path: str | Path) -> np.ndarray | None:
@@ -244,10 +257,14 @@ class CloudMaskSupervisor:
         if pair is None:
             return None
         if key not in self._cache:
-            cloudy_path, clear_path = pair
-            cloudy_rgb = _load_rgb_image(cloudy_path, self.cfg.image_size)
-            clear_rgb = _load_rgb_image(clear_path, self.cfg.image_size)
-            mask = compute_cloud_mask_from_pair(cloudy_rgb, clear_rgb, self.sky_mask, self.cfg)
+            mask_path = self._mask_paths.get(key)
+            if mask_path is not None and mask_path.exists():
+                mask = _load_binary_mask(mask_path, self.cfg.image_size) * self.sky_mask.astype(np.float32)
+            else:
+                cloudy_path, clear_path = pair
+                cloudy_rgb = _load_rgb_image(cloudy_path, self.cfg.image_size)
+                clear_rgb = _load_rgb_image(clear_path, self.cfg.image_size)
+                mask = compute_cloud_mask_from_pair(cloudy_rgb, clear_rgb, self.sky_mask, self.cfg)
             self._cache[key] = mask[None, ...].astype(np.float32)
         return self._cache[key]
 
