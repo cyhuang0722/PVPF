@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import shutil
@@ -49,7 +50,7 @@ class Config:
     output_dir: Path
     image_size: int = 256
     cloudy_label: int = 2
-    max_cloudy_days: int = 20
+    max_cloudy_days: int | None = 20
     start_hour: int = 8
     end_hour: int = 17
     diff_threshold: float = 0.05
@@ -425,7 +426,7 @@ def build_day_pair_table(manifest: pd.DataFrame, clear_windows: pd.DataFrame, cf
             continue
         paired_rows.extend(hour_rows)
         selected_days += 1
-        if selected_days >= cfg.max_cloudy_days:
+        if cfg.max_cloudy_days is not None and selected_days >= cfg.max_cloudy_days:
             break
 
     if not paired_rows:
@@ -484,13 +485,45 @@ def save_pair_figure(
 
 
 def main() -> None:
-    root = Path("/Users/huangchouyue/Projects/PVPF")
+    default_root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description="Run clear-sky difference cloud-mask experiment.")
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=default_root,
+        help="PVPF project root. Defaults to the parent directory of this script.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Output directory. Defaults to ROOT/cloud_seg2/outputs_decision.",
+    )
+    parser.add_argument(
+        "--all",
+        "--all-cloudy-days",
+        action="store_true",
+        dest="all_cloudy_days",
+        help="Process every cloudy day that satisfies the hourly pairing requirements.",
+    )
+    parser.add_argument(
+        "--max-cloudy-days",
+        type=int,
+        default=20,
+        help="Maximum number of qualifying cloudy days to process. Use --all to disable this limit.",
+    )
+    args = parser.parse_args()
+    if args.max_cloudy_days <= 0:
+        raise ValueError("--max-cloudy-days must be positive. Use --all to process every qualifying day.")
+
+    root = args.root.resolve()
     cfg = Config(
         image_root=root / "data/camera_data/resized_256",
         weather_csv=root / "data/weather.csv",
         clear_sky_csv=root / "data/clear_sky.csv",
         sky_mask_path=root / "data/sky_mask.png",
-        output_dir=root / "cloud_seg2/outputs_decision",
+        output_dir=args.output_dir.resolve() if args.output_dir is not None else root / "cloud_seg2/outputs_decision",
+        max_cloudy_days=None if args.all_cloudy_days else args.max_cloudy_days,
     )
     dirs = ensure_dirs(cfg.output_dir)
     year = infer_dataset_year(cfg.image_root)
