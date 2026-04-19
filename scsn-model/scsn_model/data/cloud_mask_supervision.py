@@ -55,12 +55,19 @@ def _resolve_existing_path(path: str | Path) -> Path:
     if candidate.exists():
         return candidate
     text = str(candidate)
-    legacy_prefix = "/home/chuangbn/projects/PVPF"
-    local_prefix = "/Users/huangchouyue/Projects/PVPF"
-    if text.startswith(legacy_prefix):
-        remapped = Path(local_prefix + text[len(legacy_prefix) :])
-        if remapped.exists():
-            return remapped
+    path_prefixes = (
+        "/home/chuangbn/projects/PVPF",
+        "/Users/huangchouyue/Projects/PVPF",
+    )
+    for source_prefix in path_prefixes:
+        if not text.startswith(source_prefix):
+            continue
+        for target_prefix in path_prefixes:
+            if target_prefix == source_prefix:
+                continue
+            remapped = Path(target_prefix + text[len(source_prefix) :])
+            if remapped.exists():
+                return remapped
     return candidate
 
 

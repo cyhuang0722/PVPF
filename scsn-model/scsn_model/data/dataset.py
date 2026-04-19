@@ -33,12 +33,19 @@ def resolve_existing_path(path: str | Path) -> Path:
     if candidate.exists():
         return candidate
     text = str(candidate)
-    legacy_prefix = "/home/chuangbn/projects/PVPF"
-    local_prefix = "/Users/huangchouyue/Projects/PVPF"
-    if text.startswith(legacy_prefix):
-        remapped = Path(local_prefix + text[len(legacy_prefix) :])
-        if remapped.exists():
-            return remapped
+    path_prefixes = (
+        "/home/chuangbn/projects/PVPF",
+        "/Users/huangchouyue/Projects/PVPF",
+    )
+    for source_prefix in path_prefixes:
+        if not text.startswith(source_prefix):
+            continue
+        for target_prefix in path_prefixes:
+            if target_prefix == source_prefix:
+                continue
+            remapped = Path(target_prefix + text[len(source_prefix) :])
+            if remapped.exists():
+                return remapped
     return candidate
 
 
@@ -78,12 +85,15 @@ class SunConditionedCloudDataset(Dataset):
         if cloud_mask_manifest_path and cloud_mask_sky_mask_path:
             manifest_path = resolve_existing_path(cloud_mask_manifest_path)
             mask_path = resolve_existing_path(cloud_mask_sky_mask_path)
-            if manifest_path.exists() and mask_path.exists():
-                self.cloud_mask_supervisor = CloudMaskSupervisor(
-                    manifest_path=manifest_path,
-                    sky_mask_path=mask_path,
-                    image_size=self.image_size,
-                )
+            if not manifest_path.exists():
+                raise FileNotFoundError(f"Cloud mask manifest not found: {cloud_mask_manifest_path} (resolved to {manifest_path})")
+            if not mask_path.exists():
+                raise FileNotFoundError(f"Cloud mask sky mask not found: {cloud_mask_sky_mask_path} (resolved to {mask_path})")
+            self.cloud_mask_supervisor = CloudMaskSupervisor(
+                manifest_path=manifest_path,
+                sky_mask_path=mask_path,
+                image_size=self.image_size,
+            )
 
     def __len__(self) -> int:
         return len(self.df)

@@ -294,12 +294,22 @@ def train_model(config: dict) -> Path:
     }
     logger.info("Dataset sizes train=%d val=%d test=%d", len(datasets["train"]), len(datasets["val"]), len(datasets["test"]))
     for split_name, split_ds in datasets.items():
+        if split_ds.cloud_mask_supervisor is not None:
+            logger.info("Cloud-mask manifest %s resolved to %s", split_name, split_ds.cloud_mask_supervisor.manifest_path)
         valid_masks, total_masks = split_ds.cloud_mask_coverage()
         logger.info("Cloud-mask coverage %s=%d/%d", split_name, valid_masks, total_masks)
         if split_name == "train" and float(config["loss"].get("cloud_mask_weight", 0.0)) > 0.0 and valid_masks == 0:
+            sample_key = "<empty train split>"
+            if len(split_ds.df) > 0:
+                sample_paths = _parse_jsonish(split_ds.df.iloc[0]["img_paths"])
+                sample_key = Path(str(sample_paths[-1])).name
+            manifest_keys = []
+            if split_ds.cloud_mask_supervisor is not None:
+                manifest_keys = split_ds.cloud_mask_supervisor.available_keys()[:5]
             raise RuntimeError(
                 "cloud_mask_weight is > 0 but no train samples matched cloud masks. "
-                "Check data.cloud_mask_manifest_path and image path roots."
+                f"Check data.cloud_mask_manifest_path and image path roots. "
+                f"First train current-frame key={sample_key!r}; first manifest keys={manifest_keys!r}."
             )
     persistence_by_split = {split_name: _persistence_metrics(split_ds) for split_name, split_ds in datasets.items()}
     smart_persistence_by_split = {split_name: _smart_persistence_metrics(split_ds, config) for split_name, split_ds in datasets.items()}
