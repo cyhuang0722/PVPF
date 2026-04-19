@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scsn_model.utils.io import ensure_dir, load_json, save_json
+from scsn_model.utils.io import ensure_dir, load_json, normalize_config_paths, resolve_project_path, save_json
 from scsn_model.utils.runtime import configure_matplotlib_cache
 
 configure_matplotlib_cache(ROOT / "artifacts")
@@ -30,7 +30,7 @@ def _sample_day_rows(df: pd.DataFrame, day: str, samples_per_day: int) -> pd.Dat
 
 
 def _draw_sun_marker(image_path: str, sun_x: float, sun_y: float, out_path: Path, label: str) -> None:
-    with Image.open(image_path) as im:
+    with Image.open(resolve_project_path(image_path, must_exist=True)) as im:
         img = im.convert("RGB")
     draw = ImageDraw.Draw(img)
     r = 8
@@ -50,11 +50,11 @@ def main() -> None:
     parser.add_argument("--out-dir", default=str(ROOT / "artifacts" / "sanity_check_sun"))
     args = parser.parse_args()
 
-    config = load_json(args.config)
-    samples_path = Path(config["data"]["samples_csv"])
+    config = normalize_config_paths(load_json(args.config))
+    samples_path = resolve_project_path(config["data"]["samples_csv"], must_exist=True)
     df = pd.read_csv(samples_path)
     df["ts_anchor"] = pd.to_datetime(df["ts_anchor"])
-    out_dir = ensure_dir(args.out_dir)
+    out_dir = ensure_dir(resolve_project_path(args.out_dir, must_exist=False))
 
     summary_rows: list[dict] = []
     for day in args.dates:

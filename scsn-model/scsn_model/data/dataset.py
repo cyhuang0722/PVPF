@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from ..utils.io import resolve_project_path
 from .cloud_mask_supervision import CloudMaskSupervisor
 
 
@@ -29,23 +30,9 @@ def load_rgb_image(path: str | Path, size: tuple[int, int]) -> np.ndarray:
 
 
 def resolve_existing_path(path: str | Path) -> Path:
-    candidate = Path(path)
+    candidate = resolve_project_path(path, must_exist=False)
     if candidate.exists():
         return candidate
-    text = str(candidate)
-    path_prefixes = (
-        "/home/chuangbn/projects/PVPF",
-        "/Users/huangchouyue/Projects/PVPF",
-    )
-    for source_prefix in path_prefixes:
-        if not text.startswith(source_prefix):
-            continue
-        for target_prefix in path_prefixes:
-            if target_prefix == source_prefix:
-                continue
-            remapped = Path(target_prefix + text[len(source_prefix) :])
-            if remapped.exists():
-                return remapped
     return candidate
 
 
@@ -77,7 +64,9 @@ class SunConditionedCloudDataset(Dataset):
         self.df = self.df[self.df["split"] == split].reset_index(drop=True)
         self.image_size = tuple(int(v) for v in image_size)
         resolved_sky_mask_path = resolve_existing_path(sky_mask_path) if sky_mask_path else None
-        self.mask = load_mask(resolved_sky_mask_path, self.image_size) if resolved_sky_mask_path and resolved_sky_mask_path.exists() else None
+        if resolved_sky_mask_path and not resolved_sky_mask_path.exists():
+            raise FileNotFoundError(f"Sky mask not found: {sky_mask_path} (resolved to {resolved_sky_mask_path})")
+        self.mask = load_mask(resolved_sky_mask_path, self.image_size) if resolved_sky_mask_path else None
         self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
         if self.peak_power_w <= 0:
             raise ValueError("peak_power_w must be positive.")

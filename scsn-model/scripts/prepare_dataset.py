@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scsn_model.data.preprocessing import build_samples, save_samples
-from scsn_model.utils.io import load_json
+from scsn_model.utils.io import load_json, normalize_config_paths
 
 
 def main() -> None:
@@ -17,7 +17,7 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to config JSON")
     args = parser.parse_args()
 
-    config = load_json(args.config)
+    config = normalize_config_paths(load_json(args.config))
     df, summary = build_samples(config)
     save_samples(df, summary, config)
     print(f"Saved {len(df)} samples to {config['data']['samples_csv']}")
@@ -25,4 +25,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

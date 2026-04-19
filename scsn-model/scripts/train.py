@@ -14,7 +14,7 @@ from scsn_model.utils.runtime import configure_matplotlib_cache
 configure_matplotlib_cache(ROOT / "artifacts")
 
 from scsn_model.train.trainer import train_model
-from scsn_model.utils.io import load_json
+from scsn_model.utils.io import load_json, normalize_config_paths
 
 
 def main() -> None:
@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to config JSON")
     args = parser.parse_args()
 
-    config = load_json(args.config)
+    config = normalize_config_paths(load_json(args.config))
     run_dir = train_model(config)
     print(f"Training finished. Outputs saved to {run_dir}")
 

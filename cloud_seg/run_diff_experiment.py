@@ -497,7 +497,7 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="Output directory. Defaults to ROOT/cloud_seg2/outputs_decision.",
+        help="Output directory. Defaults to ROOT/cloud_seg/outputs_final.",
     )
     parser.add_argument(
         "--all",
@@ -522,7 +522,7 @@ def main() -> None:
         weather_csv=root / "data/weather.csv",
         clear_sky_csv=root / "data/clear_sky.csv",
         sky_mask_path=root / "data/sky_mask.png",
-        output_dir=args.output_dir.resolve() if args.output_dir is not None else root / "cloud_seg2/outputs_decision",
+        output_dir=args.output_dir.resolve() if args.output_dir is not None else root / "cloud_seg" / "outputs_final",
         max_cloudy_days=None if args.all_cloudy_days else args.max_cloudy_days,
     )
     dirs = ensure_dirs(cfg.output_dir)

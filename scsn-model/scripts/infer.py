@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from scsn_model.data.dataset import SunConditionedCloudDataset
 from scsn_model.models.full_model import SunConditionedStochasticCloudModel
 from scsn_model.train.trainer import _evaluate_split
-from scsn_model.utils.io import load_json
+from scsn_model.utils.io import load_json, normalize_config_paths, resolve_project_path
 from scsn_model.utils.runtime import configure_matplotlib_cache
 
 configure_matplotlib_cache(ROOT / "artifacts")
@@ -27,8 +27,8 @@ def main() -> None:
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     args = parser.parse_args()
 
-    config = load_json(args.config)
-    run_dir = Path(args.run_dir)
+    config = normalize_config_paths(load_json(args.config))
+    run_dir = resolve_project_path(args.run_dir, must_exist=True)
     device_cfg = str(config.get("device", "auto")).lower()
     device = torch.device("cuda" if device_cfg == "auto" and torch.cuda.is_available() else device_cfg if device_cfg != "auto" else "cpu")
 

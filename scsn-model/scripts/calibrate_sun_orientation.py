@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scsn_model.data.solar_geometry import Calibration, compute_solar_position, project_sun_to_image
-from scsn_model.utils.io import ensure_dir, load_json, save_json
+from scsn_model.utils.io import ensure_dir, load_json, normalize_config_paths, resolve_project_path, save_json
 from scsn_model.utils.runtime import configure_matplotlib_cache
 
 configure_matplotlib_cache(ROOT / "artifacts")
@@ -107,7 +107,7 @@ def gather_samples(
     data_cfg = config["data"]
     timezone = data_cfg["timezone"]
     date_prefix = pd.Timestamp(date_str).strftime("%Y-%m-%d")
-    camera_root = Path(data_cfg["camera_dir"])
+    camera_root = resolve_project_path(data_cfg["camera_dir"], must_exist=True)
 
     candidates = sorted(camera_root.rglob("*2026*.jpg"))
     rows: list[dict] = []
@@ -125,7 +125,7 @@ def gather_samples(
         with Image.open(path) as im:
             img = np.asarray(im.convert("RGB"))
         image_shape = img.shape[:2]
-        mask = load_mask(Path(data_cfg["sky_mask_path"]), image_shape)
+        mask = load_mask(resolve_project_path(data_cfg["sky_mask_path"], must_exist=True), image_shape)
         centroid, score = detect_sun_centroid_simple(img, mask)
         if centroid is None or float(score) < min_score:
             continue
@@ -247,7 +247,7 @@ def save_overlays(sample_df: pd.DataFrame, best: dict, out_dir: Path) -> None:
     )
 
     for idx, row in sample_df.iterrows():
-        with Image.open(row["image_path"]) as im:
+        with Image.open(resolve_project_path(row["image_path"], must_exist=True)) as im:
             img = im.convert("RGB")
         draw = ImageDraw.Draw(img)
         ud, vd = float(row["u_detect"]), float(row["v_detect"])
@@ -267,6 +267,7 @@ def save_overlays(sample_df: pd.DataFrame, best: dict, out_dir: Path) -> None:
 
 
 def maybe_update_config(config_path: Path, best: dict) -> None:
+    config_path = config_path.expanduser().resolve()
     config = load_json(config_path)
     config["data"]["azimuth_offset_deg"] = round(float(best["azimuth_offset_deg"]), 3)
     config["data"]["azimuth_clockwise"] = bool(best["azimuth_clockwise"])
@@ -292,7 +293,7 @@ def main() -> None:
     parser.add_argument("--update-config", action="store_true")
     args = parser.parse_args()
 
-    config = load_json(args.config)
+    config = normalize_config_paths(load_json(args.config))
     sample_df, image_shape = gather_samples(
         config=config,
         date_str=args.date,
@@ -301,10 +302,10 @@ def main() -> None:
         min_score=args.min_score,
     )
     img_h, img_w = image_shape
-    calib = Calibration.from_json(config["data"]["calibration_json"]).rescale(dst_w=img_w, dst_h=img_h)
+    calib = Calibration.from_json(resolve_project_path(config["data"]["calibration_json"], must_exist=True)).rescale(dst_w=img_w, dst_h=img_h)
     best = search_best_projection(sample_df, calib, img_w, img_h)
 
-    out_dir = ensure_dir(Path(args.out_dir) / args.date)
+    out_dir = ensure_dir(resolve_project_path(args.out_dir, must_exist=False) / args.date)
     save_overlays(sample_df, best, out_dir)
     summary = {
         "date": args.date,
@@ -319,7 +320,7 @@ def main() -> None:
         "projection_cy_px": float(best.get("projection_cy_px")),
         "projection_f_px_per_rad": float(best.get("projection_f_px_per_rad")),
         "mean_error_px": float(best["mean_error_px"]),
-        "config_path": str(Path(args.config)),
+        "config_path": str(Path(args.config).expanduser().resolve()),
     }
     save_json(out_dir / "orientation_fit_summary.json", summary)
     print(json.dumps(summary, indent=2, ensure_ascii=False))

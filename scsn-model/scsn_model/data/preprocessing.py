@@ -18,7 +18,7 @@ from .solar_geometry import (
     compute_solar_position,
     project_sun_to_image,
 )
-from ..utils.io import ensure_dir, save_json
+from ..utils.io import ensure_dir, normalize_config_paths, resolve_project_path, save_json
 
 
 TIMESTAMP_PATTERN = re.compile(r"_(\d{17})_")
@@ -74,6 +74,7 @@ def load_camera_index(camera_dir: Path, camera_index_csv: Path | None, timezone:
             df["timestamp"] = df["timestamp"].dt.tz_localize(timezone)
         else:
             df["timestamp"] = df["timestamp"].dt.tz_convert(timezone)
+        df["file_path"] = df["file_path"].map(lambda value: str(resolve_project_path(value, must_exist=False)))
         return df.sort_values("timestamp").reset_index(drop=True)
     return build_camera_index(camera_dir, timezone)
 
@@ -145,6 +146,7 @@ def _get_image_size(path: str | Path) -> tuple[int, int]:
 
 
 def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
+    config = normalize_config_paths(config)
     data_cfg = config["data"]
     timezone = data_cfg["timezone"]
     sequence_offsets = data_cfg["sequence_offsets_min"]
@@ -156,8 +158,8 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
     drop_zero_input_samples = bool(data_cfg.get("drop_zero_input_samples", True))
 
     camera_df = load_camera_index(
-        Path(data_cfg["camera_dir"]),
-        Path(data_cfg["camera_index_csv"]) if data_cfg.get("camera_index_csv") else None,
+        resolve_project_path(data_cfg["camera_dir"], must_exist=True),
+        resolve_project_path(data_cfg["camera_index_csv"], must_exist=False) if data_cfg.get("camera_index_csv") else None,
         timezone,
     )
     if camera_df.empty:
@@ -166,8 +168,8 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
     source_w, source_h = _get_image_size(camera_df.iloc[0]["file_path"])
     dst_h, dst_w = int(data_cfg["image_size"][0]), int(data_cfg["image_size"][1])
 
-    pv_series = load_pv_series(Path(data_cfg["pv_csv"]), timezone)
-    calib_raw = Calibration.from_json(data_cfg["calibration_json"])
+    pv_series = load_pv_series(resolve_project_path(data_cfg["pv_csv"], must_exist=True), timezone)
+    calib_raw = Calibration.from_json(resolve_project_path(data_cfg["calibration_json"], must_exist=True))
     calib = calib_raw.rescale(dst_w=dst_w, dst_h=dst_h)
     if data_cfg.get("sun_projection_cx_px") is not None:
         calib = Calibration(
@@ -315,8 +317,9 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
 
 
 def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> None:
-    out_dir = ensure_dir(config["data"]["artifact_dir"])
-    samples_csv = Path(config["data"]["samples_csv"])
+    config = normalize_config_paths(config)
+    out_dir = ensure_dir(resolve_project_path(config["data"]["artifact_dir"], must_exist=False))
+    samples_csv = resolve_project_path(config["data"]["samples_csv"], must_exist=False)
     samples_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(samples_csv, index=False)
     save_json(

@@ -8,6 +8,12 @@ from pathlib import Path
 
 import plotly.graph_objects as go
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scsn_model.utils.io import resolve_project_path
+
 
 def _parse_timestamp(value: str) -> datetime:
     value = value.strip()
@@ -199,7 +205,7 @@ def main() -> None:
     parser.add_argument("--run-dir", required=True, help="Run directory containing predictions_train/val/test.csv")
     args = parser.parse_args()
 
-    run_dir = Path(args.run_dir)
+    run_dir = resolve_project_path(args.run_dir, must_exist=True)
     fig, out_path = build_figure(run_dir)
     fig.write_html(str(out_path), include_plotlyjs=True)
     print(out_path)

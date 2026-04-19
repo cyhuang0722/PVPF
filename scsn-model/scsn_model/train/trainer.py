@@ -13,7 +13,7 @@ from ..data.dataset import SunConditionedCloudDataset, _parse_jsonish, resolve_e
 from ..data.solar_geometry import Calibration, compute_clear_sky_power
 from ..losses.quantile import quantile_crossing_penalty, quantile_loss
 from ..models.full_model import SunConditionedStochasticCloudModel
-from ..utils.io import ensure_dir, save_json, set_seed, timestamped_run_dir
+from ..utils.io import ensure_dir, normalize_config_paths, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
 from ..viz.motion import save_scsn_state_figure
 from .metrics import regression_metrics
@@ -270,6 +270,7 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
 
 
 def train_model(config: dict) -> Path:
+    config = normalize_config_paths(config)
     set_seed(int(config["seed"]))
     run_dir = timestamped_run_dir(config["train"]["artifact_root"])
     ensure_dir(run_dir / "figures")

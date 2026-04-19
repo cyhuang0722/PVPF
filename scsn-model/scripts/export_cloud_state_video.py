@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from scsn_model.data.dataset import SunConditionedCloudDataset
 from scsn_model.models.full_model import SunConditionedStochasticCloudModel
-from scsn_model.utils.io import ensure_dir, load_json
+from scsn_model.utils.io import ensure_dir, load_json, normalize_config_paths, resolve_project_path
 from scsn_model.utils.runtime import configure_matplotlib_cache
 from scsn_model.viz.motion import save_scsn_state_figure
 
@@ -29,8 +29,8 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=4)
     args = parser.parse_args()
 
-    run_dir = Path(args.run_dir)
-    config = load_json(args.config) if args.config else load_json(run_dir / "run_config.json")
+    run_dir = resolve_project_path(args.run_dir, must_exist=True)
+    config = normalize_config_paths(load_json(args.config) if args.config else load_json(run_dir / "run_config.json"))
     device_cfg = str(config.get("device", "auto")).lower()
     device = torch.device("cuda" if device_cfg == "auto" and torch.cuda.is_available() else device_cfg if device_cfg != "auto" else "cpu")
 

@@ -15,6 +15,7 @@ from scsn_model.utils.runtime import configure_matplotlib_cache
 configure_matplotlib_cache(ROOT / "artifacts")
 
 from scsn_model.viz.forecast import save_forecast_band_plot
+from scsn_model.utils.io import resolve_project_path
 
 
 def main() -> None:
@@ -25,7 +26,7 @@ def main() -> None:
     parser.add_argument("--end", default=None)
     args = parser.parse_args()
 
-    run_dir = Path(args.run_dir)
+    run_dir = resolve_project_path(args.run_dir, must_exist=True)
     pred_csv = run_dir / f"predictions_{args.split}.csv"
     df = pd.read_csv(pred_csv)
     df["ts_target"] = pd.to_datetime(df["ts_target"])

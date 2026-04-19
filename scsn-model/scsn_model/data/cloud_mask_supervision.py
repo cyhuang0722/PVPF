@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
+from ..utils.io import resolve_project_path
+
 try:
     from scipy.ndimage import binary_closing as ndi_binary_closing
     from scipy.ndimage import binary_dilation as ndi_binary_dilation
@@ -51,23 +53,9 @@ class CloudMaskConfig:
 
 
 def _resolve_existing_path(path: str | Path) -> Path:
-    candidate = Path(path)
+    candidate = resolve_project_path(path, must_exist=False)
     if candidate.exists():
         return candidate
-    text = str(candidate)
-    path_prefixes = (
-        "/home/chuangbn/projects/PVPF",
-        "/Users/huangchouyue/Projects/PVPF",
-    )
-    for source_prefix in path_prefixes:
-        if not text.startswith(source_prefix):
-            continue
-        for target_prefix in path_prefixes:
-            if target_prefix == source_prefix:
-                continue
-            remapped = Path(target_prefix + text[len(source_prefix) :])
-            if remapped.exists():
-                return remapped
     return candidate
 
 
