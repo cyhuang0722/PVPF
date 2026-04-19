@@ -16,22 +16,20 @@ def save_scsn_state_figure(
     attention: np.ndarray,
     current_cloud_prob: np.ndarray,
     future_cloud_prob: np.ndarray,
-    motion_u: np.ndarray,
-    motion_v: np.ndarray,
+    motion_hotspot: np.ndarray,
     future_sun_cloud_prob: np.ndarray,
     out_path: str | Path,
     title: str,
     cloud_mask: np.ndarray | None = None,
     cloud_mask_valid: bool = False,
+    future_cloud_uncertainty: np.ndarray | None = None,
 ) -> None:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     rgb = np.transpose(image, (1, 2, 0))
-    motion_mag = np.sqrt(motion_u**2 + motion_v**2)
-    cloud_uncertainty = 4.0 * future_cloud_prob * (1.0 - future_cloud_prob)
-    step = max(motion_mag.shape[0] // 12, 1)
-    yy, xx = np.mgrid[0 : motion_mag.shape[0] : step, 0 : motion_mag.shape[1] : step]
+    if future_cloud_uncertainty is None:
+        future_cloud_uncertainty = 4.0 * future_cloud_prob * (1.0 - future_cloud_prob)
 
     fig, axes = plt.subplots(2, 4, figsize=(18, 9), constrained_layout=True)
     axes[0, 0].imshow(rgb)
@@ -63,11 +61,10 @@ def save_scsn_state_figure(
         axes[1, 0].set_title("Pseudo Cloud Mask (missing)")
     axes[1, 0].axis("off")
 
-    motion_im = axes[1, 1].imshow(motion_mag, cmap="inferno", vmin=0.0, vmax=max(float(np.max(motion_mag)), 1e-6))
-    axes[1, 1].quiver(xx, yy, motion_u[::step, ::step], motion_v[::step, ::step], color="white")
-    axes[1, 1].set_title("Future Motion")
+    motion_im = axes[1, 1].imshow(motion_hotspot, cmap="inferno", vmin=0.0, vmax=1.0)
+    axes[1, 1].set_title("Future Motion Hotspot")
     axes[1, 1].axis("off")
-    _add_colorbar(fig, motion_im, axes[1, 1], "pixels")
+    _add_colorbar(fig, motion_im, axes[1, 1], "relative activity", ticks=[0.0, 0.5, 1.0])
 
     axes[1, 2].plot(np.arange(1, len(future_sun_cloud_prob) + 1), future_sun_cloud_prob, color="tab:blue", linewidth=1.8)
     axes[1, 2].set_ylim(0.0, 1.0)
@@ -75,8 +72,8 @@ def save_scsn_state_figure(
     axes[1, 2].set_xlabel("Forecast Step")
     axes[1, 2].grid(alpha=0.25)
 
-    uncertainty_im = axes[1, 3].imshow(cloud_uncertainty, cmap="cividis", vmin=0.0, vmax=1.0)
-    axes[1, 3].set_title("Future Cloud Uncertainty")
+    uncertainty_im = axes[1, 3].imshow(future_cloud_uncertainty, cmap="cividis", vmin=0.0, vmax=1.0)
+    axes[1, 3].set_title("Future Cloud Risk/Uncertainty")
     axes[1, 3].axis("off")
     _add_colorbar(fig, uncertainty_im, axes[1, 3], "uncertainty", ticks=[0.0, 0.5, 1.0])
 

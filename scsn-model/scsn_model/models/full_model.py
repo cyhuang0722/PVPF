@@ -21,6 +21,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
         self.spatial_feature_dim = int(model_cfg.get("spatial_feature_dim", 128))
         self.sun_feature_dim = int(model_cfg.get("sun_feature_dim", 32))
         self.disable_sun_attention = bool(model_cfg.get("disable_sun_attention", False))
+        self.max_motion = float(model_cfg.get("max_motion_displacement", 2.5))
 
         encoder_channels = list(model_cfg.get("frame_channels", [32, 64, 96, 128]))
         temporal_dim = int(model_cfg.get("temporal_hidden_dim", 256))
@@ -48,7 +49,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
             hidden_dim=dynamics_hidden,
             sun_feat_dim=self.sun_feature_dim,
             feature_hw=self.feature_hw,
-            max_motion=float(model_cfg.get("max_motion_displacement", 2.5)),
+            max_motion=self.max_motion,
         )
         self.reconstruction_head = nn.Sequential(
             nn.Conv2d(temporal_dim, temporal_dim // 2, kernel_size=3, padding=1),
@@ -92,8 +93,13 @@ class SunConditionedStochasticCloudModel(nn.Module):
         target_sun_xy = target_sun_xy if target_sun_xy is not None else sun_xy
         attention_map = self._build_sun_attention(target_sun_xy, decoded["transmission_maps"].shape[-2], decoded["transmission_maps"].shape[-1], height, width)
         final_cloud_prob = decoded["future_cloud_prob_maps"][:, -1]
+        motion_hotspot = decoded["motion_fields"].pow(2).sum(dim=2, keepdim=True).sqrt()
+        motion_hotspot = (motion_hotspot / max(self.max_motion, 1e-6)).clamp(0.0, 1.0)
+        final_motion_hotspot = motion_hotspot[:, -1]
+        cloud_uncertainty = (0.65 * (4.0 * decoded["future_cloud_prob_maps"] * (1.0 - decoded["future_cloud_prob_maps"])) + 0.35 * motion_hotspot).clamp(0.0, 1.0)
         attention_norm = attention_map.sum(dim=(2, 3)).clamp_min(1e-6)
         sun_local_cloud_prob = (final_cloud_prob * attention_map).sum(dim=(2, 3)) / attention_norm
+        sun_local_motion_hotspot = (final_motion_hotspot * attention_map).sum(dim=(2, 3)) / attention_norm
         future_sun_cloud_prob = (
             decoded["future_cloud_prob_maps"] * attention_map.unsqueeze(1)
         ).sum(dim=(3, 4)).squeeze(-1) / attention_norm.unsqueeze(1).squeeze(-1)
@@ -101,7 +107,8 @@ class SunConditionedStochasticCloudModel(nn.Module):
         sun_local_transmission = 1.0 - sun_local_cloud_prob
         sun_local_gap = 1.0 - global_cloud_prob
         sun_local_opacity = sun_local_cloud_prob
-        sun_occlusion_risk = torch.maximum(decoded["sun_occlusion"][:, -1:].contiguous(), sun_local_cloud_prob)
+        sun_hotspot_risk = (0.75 * sun_local_cloud_prob + 0.25 * sun_local_motion_hotspot).clamp(0.0, 1.0)
+        sun_occlusion_risk = torch.maximum(decoded["sun_occlusion"][:, -1:].contiguous(), sun_hotspot_risk)
 
         prediction = self.power_head(
             pooled_cloud=temporal_out["global_feat"],
@@ -121,7 +128,12 @@ class SunConditionedStochasticCloudModel(nn.Module):
             "sun_occlusion": decoded["sun_occlusion"],
             "transmission_maps": decoded["transmission_maps"],
             "future_cloud_prob_maps": decoded["future_cloud_prob_maps"],
+            "future_motion_hotspot_maps": motion_hotspot,
+            "future_cloud_uncertainty_maps": cloud_uncertainty,
             "future_sun_cloud_prob": future_sun_cloud_prob,
+            "future_sun_motion_hotspot": (
+                motion_hotspot * attention_map.unsqueeze(1)
+            ).sum(dim=(3, 4)).squeeze(-1) / attention_norm.unsqueeze(1).squeeze(-1),
             "current_opacity": decoded["current_opacity"],
             "current_gap": decoded["current_gap"],
             "current_transmission": decoded["current_transmission"],

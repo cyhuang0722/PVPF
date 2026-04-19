@@ -223,8 +223,8 @@ def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunCo
         "future_sun_cloud_prob": out["future_sun_cloud_prob"][0].detach().cpu().numpy(),
         "cloud_mask": batch["cloud_mask"][0, 0].detach().cpu().numpy(),
         "cloud_mask_valid": bool(batch["cloud_mask_valid"][0].detach().cpu().item() > 0.0),
-        "motion_u": out["motion_fields"][0, -1, 0].detach().cpu().numpy(),
-        "motion_v": out["motion_fields"][0, -1, 1].detach().cpu().numpy(),
+        "motion_hotspot": out["future_motion_hotspot_maps"][0, -1, 0].detach().cpu().numpy(),
+        "future_cloud_uncertainty": out["future_cloud_uncertainty_maps"][0, -1, 0].detach().cpu().numpy(),
         "title": str(frame["ts_target"]),
     }
 
@@ -297,7 +297,7 @@ def train_model(config: dict) -> Path:
         valid_masks, total_masks = split_ds.cloud_mask_coverage()
         logger.info("Cloud-mask coverage %s=%d/%d", split_name, valid_masks, total_masks)
         if split_name == "train" and float(config["loss"].get("cloud_mask_weight", 0.0)) > 0.0 and valid_masks == 0:
-            logger.warning(
+            raise RuntimeError(
                 "cloud_mask_weight is > 0 but no train samples matched cloud masks. "
                 "Check data.cloud_mask_manifest_path and image path roots."
             )
@@ -428,12 +428,12 @@ def train_model(config: dict) -> Path:
                 attention=item["attention"],
                 current_cloud_prob=item["current_cloud_prob"],
                 future_cloud_prob=item["future_cloud_prob"],
-                motion_u=item["motion_u"],
-                motion_v=item["motion_v"],
+                motion_hotspot=item["motion_hotspot"],
                 future_sun_cloud_prob=item["future_sun_cloud_prob"],
                 out_path=run_dir / "figures" / f"cloud_state_{split_name}_{idx:02d}.png",
                 title=str(item["title"]),
                 cloud_mask=item["cloud_mask"],
                 cloud_mask_valid=bool(item["cloud_mask_valid"]),
+                future_cloud_uncertainty=item["future_cloud_uncertainty"],
             )
     return run_dir
