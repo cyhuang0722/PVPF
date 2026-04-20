@@ -30,12 +30,12 @@ scsn-model/
 - 输入：16帧天空图序列
 - 通道：`RGB + RBR + sun_distance + mask = 6`
 - 编码：`Image Encoder + ConvLSTM`
-- 结构化潜变量：`z_motion / z_opacity / z_gap / z_sun`
+- 结构化潜变量：`z_motion / z_sun`
 - 动力学：`Variational GRU`
 - 解码：未来15步的 `motion / cloud probability / sun-region cloud probability`
 - 预测头：输出`q10 / q50 / q90`
-- 训练损失：`Pinball + quantile crossing + KL + motion smoothness + RBR reconstruction`
-- 弱监督：可选读取 `cloud_seg/outputs_final/manifests/hourly_summary.csv`，按输入末帧匹配 cloudy/clear 图对，重算 cloud mask 后只监督当前 `cloud probability`
+- 训练损失：`Pinball + quantile crossing + KL + motion smoothness + RBR reconstruction + future RBR change hotspot`
+- 弱监督：可选读取 cloud-mask manifest，按输入末帧匹配 cloudy/clear 图对，重算 cloud mask 后只作为当前 `cloud probability` 的轻量 prior
 
 ## 使用方法
 
@@ -100,4 +100,4 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
 - `loss.cloud_fraction_weight`: `0.10`
 - `loss.future_hotspot_weight`: `0.05`
 
-训练时只有能按输入序列末帧文件名命中 manifest 的样本会计算 cloud-mask loss；没有 cloud mask 的样本保持原来的训练逻辑。Cloud mask 只作为轻量 current-cloud prior；未来 15 分钟的运动/变化解释主要由相邻帧 RBR change hotspot 和 PV loss 约束。`opacity_proxy / gap_proxy / transmission_proxy` 默认权重已设为 `0.0`，避免 noisy mask 被强行解释成像素级光学状态。
+训练时只有能按输入序列末帧文件名命中 manifest 的样本会计算 cloud-mask loss；没有 cloud mask 的样本保持原来的训练逻辑。Cloud mask 只作为轻量 current-cloud prior；未来 15 分钟的运动/变化解释主要由相邻帧 RBR change hotspot 和 PV loss 约束。`transmission / opacity / gap` 这类不可验证的物理 decoder 已移除，避免 noisy mask 被强行解释成像素级光学状态。

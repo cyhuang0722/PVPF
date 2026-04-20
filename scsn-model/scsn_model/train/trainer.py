@@ -160,21 +160,10 @@ def _warp_with_flow(image: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
 
 
 def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, torch.Tensor], loss_cfg: dict) -> dict[str, torch.Tensor]:
-    current_opacity = output["current_opacity"]
-    current_gap = output["current_gap"]
-    current_transmission = output["current_transmission"]
     current_cloud_prob = output["current_cloud_prob"]
 
-    opacity_proxy = _resize_like(data["opacity_proxy"], current_opacity)
-    gap_proxy = _resize_like(data["gap_proxy"], current_gap)
-    transmission_proxy = _resize_like(data["transmission_proxy"], current_transmission)
-
-    opacity_proxy_loss = F.l1_loss(current_opacity, opacity_proxy)
-    gap_proxy_loss = F.l1_loss(current_gap, gap_proxy)
-    transmission_proxy_loss = F.l1_loss(current_transmission, transmission_proxy)
-
-    prev_rbr = _resize_like(data["prev_rbr"], current_opacity)
-    curr_rbr = _resize_like(data["target_rbr"], current_opacity)
+    prev_rbr = _resize_like(data["prev_rbr"], current_cloud_prob)
+    curr_rbr = _resize_like(data["target_rbr"], current_cloud_prob)
     flow_now = output["motion_fields"][:, 0]
     warped_prev = _warp_with_flow(prev_rbr, flow_now)
     motion_warp_loss = F.l1_loss(warped_prev, curr_rbr)
@@ -205,17 +194,11 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
             future_hotspot_loss = (per_sample * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
 
     return {
-        "opacity_proxy": opacity_proxy_loss,
-        "gap_proxy": gap_proxy_loss,
-        "transmission_proxy": transmission_proxy_loss,
         "motion_warp": motion_warp_loss,
         "cloud_mask": cloud_mask_loss,
         "future_hotspot": future_hotspot_loss,
         "total": (
-            float(loss_cfg.get("opacity_proxy_weight", 0.15)) * opacity_proxy_loss
-            + float(loss_cfg.get("gap_proxy_weight", 0.10)) * gap_proxy_loss
-            + float(loss_cfg.get("transmission_proxy_weight", 0.15)) * transmission_proxy_loss
-            + float(loss_cfg.get("motion_warp_weight", 0.10)) * motion_warp_loss
+            float(loss_cfg.get("motion_warp_weight", 0.10)) * motion_warp_loss
             + float(loss_cfg.get("cloud_mask_weight", 0.0)) * cloud_mask_loss
             + float(loss_cfg.get("future_hotspot_weight", 0.0)) * future_hotspot_loss
         ),
@@ -366,7 +349,7 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "opacity_proxy": [], "gap_proxy": [], "transmission_proxy": [], "motion_warp": [], "cloud_mask": [], "future_hotspot": []}
+        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "motion_warp": [], "cloud_mask": [], "future_hotspot": []}
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -409,9 +392,6 @@ def train_model(config: dict) -> Path:
             "train_kl_loss": float(np.mean(epoch_stats["kl"])),
             "train_motion_loss": float(np.mean(epoch_stats["motion"])),
             "train_recon_loss": float(np.mean(epoch_stats["recon"])),
-            "train_opacity_proxy_loss": float(np.mean(epoch_stats["opacity_proxy"])),
-            "train_gap_proxy_loss": float(np.mean(epoch_stats["gap_proxy"])),
-            "train_transmission_proxy_loss": float(np.mean(epoch_stats["transmission_proxy"])),
             "train_motion_warp_loss": float(np.mean(epoch_stats["motion_warp"])),
             "train_cloud_mask_loss": float(np.mean(epoch_stats["cloud_mask"])),
             "train_future_hotspot_loss": float(np.mean(epoch_stats["future_hotspot"])),

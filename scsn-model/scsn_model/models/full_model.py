@@ -27,8 +27,6 @@ class SunConditionedStochasticCloudModel(nn.Module):
         temporal_dim = int(model_cfg.get("temporal_hidden_dim", 256))
         latent_dims = {
             "motion": int(model_cfg.get("motion_latent_dim", 64)),
-            "opacity": int(model_cfg.get("opacity_latent_dim", 32)),
-            "gap": int(model_cfg.get("gap_latent_dim", 32)),
             "sun": int(model_cfg.get("sun_latent_dim", 16)),
         }
         latent_total_dim = sum(latent_dims.values())
@@ -80,7 +78,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
         cloud_feature = temporal_out["spatial_feat"]
         current_attention = self._build_sun_attention(sun_xy, cloud_feature.shape[-2], cloud_feature.shape[-1], height, width)
         latent = self.latent_state(cloud_feature, current_attention)
-        z0 = torch.cat([latent["samples"]["motion"], latent["samples"]["opacity"], latent["samples"]["gap"], latent["samples"]["sun"]], dim=-1)
+        z0 = torch.cat([latent["samples"]["motion"], latent["samples"]["sun"]], dim=-1)
 
         dynamics = self.dynamics(z0)
         decoded = self.cloud_decoder(
@@ -91,7 +89,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
         )
 
         target_sun_xy = target_sun_xy if target_sun_xy is not None else sun_xy
-        attention_map = self._build_sun_attention(target_sun_xy, decoded["transmission_maps"].shape[-2], decoded["transmission_maps"].shape[-1], height, width)
+        attention_map = self._build_sun_attention(target_sun_xy, decoded["future_cloud_prob_maps"].shape[-2], decoded["future_cloud_prob_maps"].shape[-1], height, width)
         future_cloud_prob_15min = decoded["future_cloud_prob_maps"].mean(dim=1)
         motion_hotspot = decoded["motion_fields"].pow(2).sum(dim=2, keepdim=True).sqrt()
         motion_hotspot = (motion_hotspot / max(self.max_motion, 1e-6)).clamp(0.0, 1.0)
@@ -105,9 +103,6 @@ class SunConditionedStochasticCloudModel(nn.Module):
             decoded["future_cloud_prob_maps"] * attention_map.unsqueeze(1)
         ).sum(dim=(3, 4)).squeeze(-1) / attention_norm.unsqueeze(1).squeeze(-1)
         global_cloud_prob = future_cloud_prob_15min.mean(dim=(2, 3))
-        sun_local_transmission = 1.0 - sun_local_cloud_prob
-        sun_local_gap = 1.0 - global_cloud_prob
-        sun_local_opacity = sun_local_cloud_prob
         sun_hotspot_risk = (0.75 * sun_local_cloud_prob + 0.25 * sun_local_motion_hotspot).clamp(0.0, 1.0)
         sun_occlusion_risk = torch.maximum(decoded["sun_occlusion"].mean(dim=1, keepdim=True), sun_hotspot_risk)
 
@@ -115,19 +110,16 @@ class SunConditionedStochasticCloudModel(nn.Module):
             pooled_cloud=temporal_out["global_feat"],
             pv_history=pv_history,
             solar_vec=solar_vec,
-            sun_local_transmission=sun_local_transmission,
-            sun_local_gap=sun_local_gap,
-            sun_local_opacity=sun_local_opacity,
+            sun_local_cloud_prob=sun_local_cloud_prob,
+            global_cloud_prob=global_cloud_prob,
+            sun_local_motion_hotspot=sun_local_motion_hotspot,
             sun_occlusion_risk=sun_occlusion_risk,
         )
         recon_rbr = torch.sigmoid(self.reconstruction_head(cloud_feature))
         return {
             "prediction": prediction,
             "motion_fields": decoded["motion_fields"],
-            "opacity_maps": decoded["opacity_maps"],
-            "gap_maps": decoded["gap_maps"],
             "sun_occlusion": decoded["sun_occlusion"],
-            "transmission_maps": decoded["transmission_maps"],
             "future_cloud_prob_maps": decoded["future_cloud_prob_maps"],
             "future_cloud_prob_15min": future_cloud_prob_15min,
             "future_motion_hotspot_maps": motion_hotspot,
@@ -135,15 +127,8 @@ class SunConditionedStochasticCloudModel(nn.Module):
             "future_cloud_uncertainty_maps": cloud_uncertainty,
             "future_cloud_uncertainty_15min": cloud_uncertainty_15min,
             "future_sun_cloud_prob": future_sun_cloud_prob,
-            "future_sun_motion_hotspot": (
-                motion_hotspot * attention_map.unsqueeze(1)
-            ).sum(dim=(3, 4)).squeeze(-1) / attention_norm.unsqueeze(1).squeeze(-1),
-            "current_opacity": decoded["current_opacity"],
-            "current_gap": decoded["current_gap"],
-            "current_transmission": decoded["current_transmission"],
             "current_cloud_prob": decoded["current_cloud_prob"],
             "attention_map": attention_map,
-            "sun_prior": current_attention,
             "recon_rbr": recon_rbr,
             "kl_loss": latent["kl_loss"],
             "motion_reg_loss": self._motion_smoothness(decoded["motion_fields"]),

@@ -122,26 +122,12 @@ class SunConditionedCloudDataset(Dataset):
         target_rbr = input_frames[-1, 3:4]
         prev_rbr = input_frames[-2, 3:4] if input_frames.shape[0] > 1 else target_rbr.copy()
         past_rbr_change_hotspot = self._rbr_change_hotspot(frames)
-        future_rbr_change_seq, future_rbr_change_hotspot = self._future_rbr_change_hotspot(frames[-1:], future_frames)
-        opacity_proxy, gap_proxy, transmission_proxy = self._build_state_proxies(frames[-1], target_rbr, target_sun_xy)
-
-        azimuth_rad = np.deg2rad(float(row["azimuth_deg"]))
-        elevation_rad = np.deg2rad(90.0 - float(row["zenith_deg"]))
-        sun_angles = np.asarray([azimuth_rad / np.pi, elevation_rad / (0.5 * np.pi)], dtype=np.float32)
-
-        target_azimuth_rad = np.deg2rad(float(row.get("target_azimuth_deg", row["azimuth_deg"])))
-        target_elevation_rad = np.deg2rad(90.0 - float(row.get("target_zenith_deg", row["zenith_deg"])))
-        target_sun_angles = np.asarray(
-            [target_azimuth_rad / np.pi, target_elevation_rad / (0.5 * np.pi)],
-            dtype=np.float32,
-        )
+        future_rbr_change_hotspot = self._future_rbr_change_hotspot(frames[-1:], future_frames)
 
         return {
             "images": torch.from_numpy(input_frames.astype(np.float32)),
             "pv_history": torch.tensor(past_pv / self.peak_power_w, dtype=torch.float32),
             "solar_vec": torch.tensor(solar_vec, dtype=torch.float32),
-            "sun_angles": torch.tensor(sun_angles, dtype=torch.float32),
-            "target_sun_angles": torch.tensor(target_sun_angles, dtype=torch.float32),
             "target": torch.tensor(float(row["target_value"]), dtype=torch.float32),
             "target_pv_w": torch.tensor(float(row["target_pv_w"]), dtype=torch.float32),
             "target_clear_sky_w": torch.tensor(float(row["target_clear_sky_w"]), dtype=torch.float32),
@@ -151,11 +137,7 @@ class SunConditionedCloudDataset(Dataset):
             "prev_rbr": torch.from_numpy(prev_rbr.astype(np.float32)),
             "past_rbr_change_hotspot": torch.from_numpy(past_rbr_change_hotspot.astype(np.float32)),
             "future_rbr_change_hotspot": torch.from_numpy(future_rbr_change_hotspot.astype(np.float32)),
-            "future_rbr_change_seq": torch.from_numpy(future_rbr_change_seq.astype(np.float32)),
             "future_hotspot_valid": torch.tensor(future_hotspot_valid, dtype=torch.float32),
-            "opacity_proxy": torch.from_numpy(opacity_proxy.astype(np.float32)),
-            "gap_proxy": torch.from_numpy(gap_proxy.astype(np.float32)),
-            "transmission_proxy": torch.from_numpy(transmission_proxy.astype(np.float32)),
             "cloud_mask": torch.from_numpy(cloud_mask.astype(np.float32)),
             "cloud_mask_valid": torch.tensor(cloud_mask_valid, dtype=torch.float32),
             "meta_index": torch.tensor(index, dtype=torch.long),
@@ -201,15 +183,14 @@ class SunConditionedCloudDataset(Dataset):
         self,
         current_frame: np.ndarray,
         future_frames: np.ndarray | None,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
         if future_frames is None or future_frames.size == 0:
-            seq = np.zeros((1, 1, self.image_size[0], self.image_size[1]), dtype=np.float32)
-            return seq, seq[0]
+            return np.zeros((1, self.image_size[0], self.image_size[1]), dtype=np.float32)
         all_frames = np.concatenate([current_frame, future_frames], axis=0)
         rbr = self._build_rbr(all_frames)
         seq = np.abs(rbr[1:] - rbr[:-1])
         seq = np.stack([self._normalize_hotspot(step) for step in seq], axis=0)
-        return seq.astype(np.float32), np.mean(seq, axis=0).astype(np.float32)
+        return np.mean(seq, axis=0).astype(np.float32)
 
     def _normalize_hotspot(self, hotspot: np.ndarray) -> np.ndarray:
         hotspot = np.asarray(hotspot, dtype=np.float32)
@@ -230,35 +211,6 @@ class SunConditionedCloudDataset(Dataset):
         dist = np.sqrt((xx - float(sun_xy[0])) ** 2 + (yy - float(sun_xy[1])) ** 2)
         dist = dist / max(np.sqrt(height**2 + width**2), 1.0)
         return dist[None, ...].astype(np.float32)
-
-    def _build_state_proxies(
-        self,
-        frame_rgb: np.ndarray,
-        rbr_map: np.ndarray,
-        sun_xy: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        red = frame_rgb[0:1]
-        green = frame_rgb[1:2]
-        blue = frame_rgb[2:3]
-        brightness = np.clip(0.299 * red + 0.587 * green + 0.114 * blue, 0.0, 1.0)
-        whiteness = 1.0 - np.clip(np.abs(red - green) + np.abs(green - blue) + np.abs(red - blue), 0.0, 1.0)
-        rbr_cloud = np.clip((rbr_map - 0.28) / 0.45, 0.0, 1.0)
-        opacity = np.clip(0.55 * whiteness + 0.45 * rbr_cloud, 0.0, 1.0)
-
-        blueness = np.clip(blue - 0.5 * (red + green), 0.0, 1.0)
-        clarity = np.clip(0.65 * blueness + 0.35 * brightness, 0.0, 1.0)
-        gap = np.clip((1.0 - opacity) * 0.5 + clarity * 0.5, 0.0, 1.0)
-
-        sun_distance = self._sun_distance_map(sun_xy=sun_xy, height=frame_rgb.shape[1], width=frame_rgb.shape[2])
-        sun_focus = np.exp(-np.square(sun_distance / 0.22)).astype(np.float32)
-        transmission = np.clip((1.0 - opacity) * 0.55 + gap * 0.45, 0.0, 1.0)
-        transmission = np.clip(transmission * (0.8 + 0.2 * sun_focus), 0.0, 1.0)
-
-        if self.mask is not None:
-            opacity = opacity * self.mask
-            gap = gap * self.mask
-            transmission = transmission * self.mask
-        return opacity, gap, transmission
 
     def _load_cloud_mask(self, current_image_path: str | Path) -> tuple[np.ndarray, float]:
         empty = np.zeros((1, self.image_size[0], self.image_size[1]), dtype=np.float32)

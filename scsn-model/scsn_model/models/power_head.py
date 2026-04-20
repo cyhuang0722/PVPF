@@ -44,18 +44,18 @@ class SunConditionedPowerHead(nn.Module):
         pooled_cloud: torch.Tensor,
         pv_history: torch.Tensor,
         solar_vec: torch.Tensor,
-        sun_local_transmission: torch.Tensor,
-        sun_local_gap: torch.Tensor,
-        sun_local_opacity: torch.Tensor,
+        sun_local_cloud_prob: torch.Tensor,
+        global_cloud_prob: torch.Tensor,
+        sun_local_motion_hotspot: torch.Tensor,
         sun_occlusion_risk: torch.Tensor,
     ) -> torch.Tensor:
         pv_feature = self.pv_encoder(pv_history)
         feature_parts = [
             pv_feature,
             solar_vec,
-            sun_local_transmission,
-            sun_local_gap,
-            sun_local_opacity,
+            sun_local_cloud_prob,
+            global_cloud_prob,
+            sun_local_motion_hotspot,
             sun_occlusion_risk,
         ]
         if self.use_global_cloud:
