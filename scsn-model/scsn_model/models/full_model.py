@@ -81,43 +81,44 @@ class SunConditionedStochasticCloudModel(nn.Module):
         )
 
         target_sun_xy = target_sun_xy if target_sun_xy is not None else sun_xy
-        attention_map = self._build_sun_attention(target_sun_xy, decoded["future_cloud_prob_maps"].shape[-2], decoded["future_cloud_prob_maps"].shape[-1], height, width)
-        future_cloud_prob_15min = decoded["future_cloud_prob_maps"].mean(dim=1)
-        change_hotspot = decoded["future_change_hotspot_maps"]
-        change_hotspot_15min = change_hotspot.mean(dim=1)
-        cloud_uncertainty = (0.65 * (4.0 * decoded["future_cloud_prob_maps"] * (1.0 - decoded["future_cloud_prob_maps"])) + 0.35 * change_hotspot).clamp(0.0, 1.0)
-        cloud_uncertainty_15min = cloud_uncertainty.mean(dim=1)
+        rbr_mean = decoded["future_rbr_mean_maps"]
+        rbr_logvar = decoded["future_rbr_logvar_maps"]
+        rbr_variance = torch.exp(rbr_logvar)
+        rbr_mean_15min = rbr_mean.mean(dim=1)
+        rbr_variance_15min = rbr_variance.mean(dim=1)
+        rbr_logvar_15min = torch.log(rbr_variance_15min.clamp_min(1e-6))
+        attention_map = self._build_sun_attention(target_sun_xy, rbr_mean_15min.shape[-2], rbr_mean_15min.shape[-1], height, width)
         attention_norm = attention_map.sum(dim=(2, 3)).clamp_min(1e-6)
-        sun_local_cloud_prob = (future_cloud_prob_15min * attention_map).sum(dim=(2, 3)) / attention_norm
-        sun_local_change_hotspot = (change_hotspot_15min * attention_map).sum(dim=(2, 3)) / attention_norm
-        future_sun_cloud_prob = (
-            decoded["future_cloud_prob_maps"] * attention_map.unsqueeze(1)
-        ).sum(dim=(3, 4)).squeeze(-1) / attention_norm.unsqueeze(1).squeeze(-1)
-        global_cloud_prob = future_cloud_prob_15min.mean(dim=(2, 3))
-        sun_hotspot_risk = (0.75 * sun_local_cloud_prob + 0.25 * sun_local_change_hotspot).clamp(0.0, 1.0)
-        sun_occlusion_risk = torch.maximum(decoded["sun_occlusion"].mean(dim=1, keepdim=True), sun_hotspot_risk)
+        sun_local_rbr_mean = (rbr_mean_15min * attention_map).sum(dim=(2, 3)) / attention_norm
+        sun_local_rbr_variance = (rbr_variance_15min * attention_map).sum(dim=(2, 3)) / attention_norm
+        global_rbr_mean = rbr_mean_15min.mean(dim=(2, 3))
+        global_rbr_variance = rbr_variance_15min.mean(dim=(2, 3))
 
-        prediction = self.power_head(
+        power = self.power_head(
             pooled_cloud=temporal_out["global_feat"],
             pv_history=pv_history,
             solar_vec=solar_vec,
-            sun_local_cloud_prob=sun_local_cloud_prob,
-            global_cloud_prob=global_cloud_prob,
-            sun_local_change_hotspot=sun_local_change_hotspot,
-            sun_occlusion_risk=sun_occlusion_risk,
+            global_rbr_mean=global_rbr_mean,
+            sun_local_rbr_mean=sun_local_rbr_mean,
+            global_rbr_variance=global_rbr_variance,
+            sun_local_rbr_variance=sun_local_rbr_variance,
         )
         recon_rbr = torch.sigmoid(self.reconstruction_head(cloud_feature))
         return {
-            "prediction": prediction,
-            "sun_occlusion": decoded["sun_occlusion"],
-            "future_cloud_prob_maps": decoded["future_cloud_prob_maps"],
-            "future_cloud_prob_15min": future_cloud_prob_15min,
-            "future_change_hotspot_maps": change_hotspot,
-            "future_change_hotspot_15min": change_hotspot_15min,
-            "future_cloud_uncertainty_maps": cloud_uncertainty,
-            "future_cloud_uncertainty_15min": cloud_uncertainty_15min,
-            "future_sun_cloud_prob": future_sun_cloud_prob,
-            "current_cloud_prob": decoded["current_cloud_prob"],
+            "prediction": power["prediction"],
+            "pv_mu": power["pv_mu"],
+            "pv_logvar": power["pv_logvar"],
+            "pv_sigma": power["pv_sigma"],
+            "future_rbr_mean_maps": rbr_mean,
+            "future_rbr_logvar_maps": rbr_logvar,
+            "future_rbr_variance_maps": rbr_variance,
+            "future_rbr_mean_15min": rbr_mean_15min,
+            "future_rbr_logvar_15min": rbr_logvar_15min,
+            "future_rbr_variance_15min": rbr_variance_15min,
+            "global_rbr_mean": global_rbr_mean,
+            "sun_local_rbr_mean": sun_local_rbr_mean,
+            "global_rbr_variance": global_rbr_variance,
+            "sun_local_rbr_variance": sun_local_rbr_variance,
             "attention_map": attention_map,
             "recon_rbr": recon_rbr,
             "kl_loss": latent["kl_loss"],

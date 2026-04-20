@@ -10,8 +10,6 @@
     "calibration_json": "/Users/huangchouyue/Projects/PVPF/data/calibration.json",
     "artifact_dir": "/Users/huangchouyue/Projects/PVPF/scsn-model/artifacts/dataset",
     "samples_csv": "/Users/huangchouyue/Projects/PVPF/scsn-model/artifacts/dataset/samples.csv",
-    "cloud_mask_manifest_path": "/Users/huangchouyue/Projects/PVPF/data/cloud_mask_ref/manifests/hourly_summary.csv",
-    "cloud_mask_sky_mask_path": "/Users/huangchouyue/Projects/PVPF/data/sky_mask.png",
     "clear_sky_exclusion_csv": "/Users/huangchouyue/Projects/PVPF/data/clear_sky_generated.csv",
     "exclude_clear_sky_days": true,
     "split_by_day": true,
@@ -60,13 +58,10 @@
   },
   "loss": {
     "pv_weight": 1.0,
-    "crossing_weight": 0.2,
     "kl_weight": 0.02,
     "reconstruction_weight": 0.2,
-    "cloud_mask_weight": 0.02,
-    "cloud_fraction_weight": 0.10,
-    "future_hotspot_weight": 0.20,
-    "future_hotspot_sun_weight": 2.0,
+    "rbr_distribution_weight": 0.20,
+    "rbr_distribution_sun_weight": 2.0,
     "grad_clip_norm": 5.0
   },
   "train": {

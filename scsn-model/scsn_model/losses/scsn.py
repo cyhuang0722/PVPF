@@ -3,19 +3,19 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .quantile import quantile_crossing_penalty, quantile_loss
-
 
 def scsn_training_loss(
-    prediction: torch.Tensor,
+    pv_mu: torch.Tensor,
+    pv_logvar: torch.Tensor,
     target: torch.Tensor,
     kl_loss: torch.Tensor,
     recon_rbr: torch.Tensor,
     target_rbr: torch.Tensor,
     loss_cfg: dict,
 ) -> dict[str, torch.Tensor]:
-    pv_loss = quantile_loss(prediction, target, [0.1, 0.5, 0.9])
-    pv_loss = pv_loss + float(loss_cfg.get("crossing_weight", 0.2)) * quantile_crossing_penalty(prediction)
+    target = target.view_as(pv_mu)
+    pv_loss = 0.5 * (torch.exp(-pv_logvar) * (target - pv_mu).pow(2) + pv_logvar)
+    pv_loss = pv_loss.mean()
     recon_loss = F.l1_loss(recon_rbr, target_rbr)
     total = (
         float(loss_cfg.get("pv_weight", 1.0)) * pv_loss

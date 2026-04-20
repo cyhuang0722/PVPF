@@ -19,35 +19,27 @@ def _resize_map(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return np.asarray(im.resize((shape[1], shape[0]), resample=Image.BILINEAR), dtype=np.float32)
 
 
-def _format_risk_summary(values: np.ndarray) -> list[str]:
-    values = np.asarray(values, dtype=np.float32).reshape(-1)
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        return ["15min sun-region risk", "missing"]
-    return [
-        "15min sun-region risk",
-        f"mean: {float(values.mean()):.3f}",
-        f"min:  {float(values.min()):.3f}",
-        f"max:  {float(values.max()):.3f}",
-        f"std:  {float(values.std()):.3f}",
-    ]
+def _format_summary(values: dict[str, float] | None) -> list[str]:
+    if not values:
+        return ["diagnostics", "missing"]
+    lines = ["diagnostics"]
+    for key, value in values.items():
+        if np.isfinite(value):
+            lines.append(f"{key}: {float(value):.3f}")
+    return lines
 
 
 def save_scsn_state_figure(
     image: np.ndarray,
     attention: np.ndarray,
-    current_cloud_prob: np.ndarray,
-    future_cloud_prob: np.ndarray,
-    change_hotspot: np.ndarray,
+    rbr_mean: np.ndarray,
+    rbr_variance: np.ndarray,
     past_rbr_change_hotspot: np.ndarray,
     future_rbr_change_hotspot: np.ndarray,
-    future_sun_cloud_prob: np.ndarray,
     out_path: str | Path,
     title: str,
-    cloud_mask: np.ndarray | None = None,
-    cloud_mask_valid: bool = False,
     future_hotspot_valid: bool = False,
-    future_cloud_uncertainty: np.ndarray | None = None,
+    summary_values: dict[str, float] | None = None,
 ) -> None:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,9 +48,8 @@ def save_scsn_state_figure(
     image_shape = rgb.shape[:2]
     attention_overlay = _resize_map(attention, image_shape)
     past_change_overlay = _resize_map(past_rbr_change_hotspot, image_shape)
-    change_overlay = _resize_map(change_hotspot, image_shape)
-    if future_cloud_uncertainty is None:
-        future_cloud_uncertainty = 4.0 * future_cloud_prob * (1.0 - future_cloud_prob)
+    mean_overlay = _resize_map(rbr_mean, image_shape)
+    variance_overlay = _resize_map(rbr_variance, image_shape)
 
     fig, axes = plt.subplots(3, 4, figsize=(18, 12), constrained_layout=True)
     axes[0, 0].imshow(rgb)
@@ -67,19 +58,19 @@ def save_scsn_state_figure(
 
     axes[0, 1].imshow(rgb)
     attention_im = axes[0, 1].imshow(attention_overlay, cmap="jet", alpha=0.4, vmin=0.0, vmax=max(float(np.max(attention_overlay)), 1e-6))
-    axes[0, 1].set_title("Sun Attention")
+    axes[0, 1].set_title("Target Sun-Region Weight")
     axes[0, 1].axis("off")
     _add_colorbar(fig, attention_im, axes[0, 1], "attention")
 
-    current_cloud_im = axes[0, 2].imshow(current_cloud_prob, cmap="Blues", vmin=0.0, vmax=1.0)
-    axes[0, 2].set_title("Current Cloud Probability")
+    mean_im = axes[0, 2].imshow(rbr_mean, cmap="viridis", vmin=0.0, vmax=1.0)
+    axes[0, 2].set_title("Predicted RBR Mean")
     axes[0, 2].axis("off")
-    _add_colorbar(fig, current_cloud_im, axes[0, 2], "probability", ticks=[0.0, 0.5, 1.0])
+    _add_colorbar(fig, mean_im, axes[0, 2], "mean", ticks=[0.0, 0.5, 1.0])
 
-    future_cloud_im = axes[0, 3].imshow(future_cloud_prob, cmap="Blues", vmin=0.0, vmax=1.0)
-    axes[0, 3].set_title("Predicted 15min Cloud Risk")
+    variance_im = axes[0, 3].imshow(rbr_variance, cmap="cividis", vmin=0.0, vmax=max(float(np.nanpercentile(rbr_variance, 99)), 1e-6))
+    axes[0, 3].set_title("Predicted RBR Variance")
     axes[0, 3].axis("off")
-    _add_colorbar(fig, future_cloud_im, axes[0, 3], "probability", ticks=[0.0, 0.5, 1.0])
+    _add_colorbar(fig, variance_im, axes[0, 3], "variance")
 
     past_change_im = axes[1, 0].imshow(past_rbr_change_hotspot, cmap="magma", vmin=0.0, vmax=1.0)
     axes[1, 0].set_title("Observed Past RBR Change")
@@ -91,52 +82,51 @@ def save_scsn_state_figure(
         axes[1, 1].set_title("Observed Future RBR Change")
         _add_colorbar(fig, future_change_im, axes[1, 1], "relative change", ticks=[0.0, 0.5, 1.0])
     else:
-        axes[1, 1].imshow(np.zeros_like(change_hotspot), cmap="magma", vmin=0.0, vmax=1.0)
+        axes[1, 1].imshow(np.zeros_like(rbr_mean), cmap="magma", vmin=0.0, vmax=1.0)
         axes[1, 1].set_title("Observed Future RBR Change (missing)")
     axes[1, 1].axis("off")
 
-    change_im = axes[1, 2].imshow(change_hotspot, cmap="inferno", vmin=0.0, vmax=1.0)
-    axes[1, 2].set_title("Predicted 15min RBR Change")
+    mean2_im = axes[1, 2].imshow(rbr_mean, cmap="viridis", vmin=0.0, vmax=1.0)
+    axes[1, 2].set_title("Predicted 15min RBR Mean")
     axes[1, 2].axis("off")
-    _add_colorbar(fig, change_im, axes[1, 2], "relative change", ticks=[0.0, 0.5, 1.0])
+    _add_colorbar(fig, mean2_im, axes[1, 2], "mean", ticks=[0.0, 0.5, 1.0])
 
-    uncertainty_im = axes[1, 3].imshow(future_cloud_uncertainty, cmap="cividis", vmin=0.0, vmax=1.0)
-    axes[1, 3].set_title("Predicted 15min Risk/Uncertainty")
     axes[1, 3].axis("off")
-    _add_colorbar(fig, uncertainty_im, axes[1, 3], "uncertainty", ticks=[0.0, 0.5, 1.0])
-
-    if cloud_mask_valid and cloud_mask is not None:
-        mask_im = axes[2, 0].imshow(cloud_mask, cmap="gray", vmin=0.0, vmax=1.0)
-        axes[2, 0].set_title("Pseudo Cloud Mask")
-        _add_colorbar(fig, mask_im, axes[2, 0], "label", ticks=[0.0, 1.0])
-    else:
-        axes[2, 0].imshow(np.zeros_like(current_cloud_prob), cmap="gray", vmin=0.0, vmax=1.0)
-        axes[2, 0].set_title("Pseudo Cloud Mask (missing)")
-    axes[2, 0].axis("off")
-
-    axes[2, 1].imshow(rgb)
-    axes[2, 1].imshow(past_change_overlay, cmap="magma", alpha=0.45, vmin=0.0, vmax=1.0)
-    axes[2, 1].set_title("Past Change Overlay")
-    axes[2, 1].axis("off")
-
-    axes[2, 2].imshow(rgb)
-    axes[2, 2].imshow(change_overlay, cmap="inferno", alpha=0.45, vmin=0.0, vmax=1.0)
-    axes[2, 2].set_title("Predicted Change Overlay")
-    axes[2, 2].axis("off")
-
-    axes[2, 3].axis("off")
-    axes[2, 3].set_title("Sun-Region Risk Summary")
-    summary_lines = _format_risk_summary(future_sun_cloud_prob)
-    axes[2, 3].text(
+    axes[1, 3].set_title("Prediction Diagnostics")
+    summary_lines = _format_summary(summary_values)
+    axes[1, 3].text(
         0.08,
         0.72,
         "\n".join(summary_lines),
-        transform=axes[2, 3].transAxes,
+        transform=axes[1, 3].transAxes,
         va="top",
         ha="left",
-        fontsize=12,
+        fontsize=11,
         family="monospace",
     )
+
+    axes[2, 0].imshow(rgb)
+    sun_overlay_im = axes[2, 0].imshow(attention_overlay, cmap="jet", alpha=0.4, vmin=0.0, vmax=max(float(np.max(attention_overlay)), 1e-6))
+    axes[2, 0].set_title("Sun Region Overlay")
+    axes[2, 0].axis("off")
+    _add_colorbar(fig, sun_overlay_im, axes[2, 0], "attention")
+
+    axes[2, 1].imshow(rgb)
+    past_overlay_im = axes[2, 1].imshow(past_change_overlay, cmap="magma", alpha=0.45, vmin=0.0, vmax=1.0)
+    axes[2, 1].set_title("Past Change Overlay")
+    axes[2, 1].axis("off")
+    _add_colorbar(fig, past_overlay_im, axes[2, 1], "relative change", ticks=[0.0, 0.5, 1.0])
+
+    axes[2, 2].imshow(rgb)
+    mean_overlay_im = axes[2, 2].imshow(mean_overlay, cmap="viridis", alpha=0.45, vmin=0.0, vmax=1.0)
+    axes[2, 2].set_title("Predicted Mean Overlay")
+    axes[2, 2].axis("off")
+    _add_colorbar(fig, mean_overlay_im, axes[2, 2], "mean", ticks=[0.0, 0.5, 1.0])
+    axes[2, 3].imshow(rgb)
+    variance_overlay_im = axes[2, 3].imshow(variance_overlay, cmap="cividis", alpha=0.45, vmin=0.0, vmax=max(float(np.nanpercentile(rbr_variance, 99)), 1e-6))
+    axes[2, 3].set_title("Predicted Variance Overlay")
+    axes[2, 3].axis("off")
+    _add_colorbar(fig, variance_overlay_im, axes[2, 3], "variance")
 
     fig.suptitle(title)
     fig.savefig(out_path, dpi=160)

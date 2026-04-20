@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 
 from ..data.dataset import SunConditionedCloudDataset, _parse_jsonish, resolve_existing_path
 from ..data.solar_geometry import Calibration, compute_clear_sky_power
-from ..losses.quantile import quantile_crossing_penalty, quantile_loss
 from ..models.full_model import SunConditionedStochasticCloudModel
 from ..utils.io import ensure_dir, normalize_config_paths, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
@@ -22,15 +21,17 @@ try:
     from ..losses.scsn import scsn_training_loss
 except ModuleNotFoundError:
     def scsn_training_loss(
-        prediction: torch.Tensor,
+        pv_mu: torch.Tensor,
+        pv_logvar: torch.Tensor,
         target: torch.Tensor,
         kl_loss: torch.Tensor,
         recon_rbr: torch.Tensor,
         target_rbr: torch.Tensor,
         loss_cfg: dict,
     ) -> dict[str, torch.Tensor]:
-        pv_loss = quantile_loss(prediction, target, [0.1, 0.5, 0.9])
-        pv_loss = pv_loss + float(loss_cfg.get("crossing_weight", 0.2)) * quantile_crossing_penalty(prediction)
+        target = target.view_as(pv_mu)
+        pv_loss = 0.5 * (torch.exp(-pv_logvar) * (target - pv_mu).pow(2) + pv_logvar)
+        pv_loss = pv_loss.mean()
         recon_loss = F.l1_loss(recon_rbr, target_rbr)
         total = (
             float(loss_cfg.get("pv_weight", 1.0)) * pv_loss
@@ -139,63 +140,52 @@ def _resize_like(tensor: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
 
 
 def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, torch.Tensor], loss_cfg: dict) -> dict[str, torch.Tensor]:
-    current_cloud_prob = output["current_cloud_prob"]
-
-    cloud_mask_loss = current_cloud_prob.new_zeros(())
-    if "cloud_mask" in data and "cloud_mask_valid" in data:
-        valid = data["cloud_mask_valid"].view(-1, 1, 1, 1)
-        if torch.any(valid > 0):
-            pseudo_cloud = _resize_like(data["cloud_mask"], current_cloud_prob).clamp(0.0, 1.0)
-            valid_count = valid.sum().clamp_min(1.0)
-            cloud_bce = F.binary_cross_entropy(current_cloud_prob.clamp(1e-4, 1.0 - 1e-4), pseudo_cloud, reduction="none")
-            cloud_pixel_loss = (cloud_bce * valid).mean(dim=(1, 2, 3)).sum() / valid_count
-            pred_fraction = current_cloud_prob.mean(dim=(1, 2, 3))
-            target_fraction = pseudo_cloud.mean(dim=(1, 2, 3))
-            cloud_fraction_loss = (torch.abs(pred_fraction - target_fraction) * valid.view(-1)).sum() / valid_count
-            cloud_mask_loss = cloud_pixel_loss + float(loss_cfg.get("cloud_fraction_weight", 0.25)) * cloud_fraction_loss
-
-    future_hotspot_loss = current_cloud_prob.new_zeros(())
+    pred_mean = output["future_rbr_mean_15min"]
+    pred_logvar = output["future_rbr_logvar_15min"]
+    future_rbr_nll = pred_mean.new_zeros(())
+    future_rbr_l1 = pred_mean.new_zeros(())
     if "future_rbr_change_hotspot" in data and "future_hotspot_valid" in data:
         valid = data["future_hotspot_valid"].view(-1, 1, 1, 1)
         if torch.any(valid > 0):
-            pred_hotspot = output["future_change_hotspot_15min"]
-            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], pred_hotspot).clamp(0.0, 1.0)
+            target_rbr = _resize_like(data["future_rbr_change_hotspot"], pred_mean).clamp(0.0, 1.0)
             attention = output["attention_map"].detach()
             attention_scale = attention.flatten(1).amax(dim=1).view(-1, 1, 1, 1).clamp_min(1e-6)
-            attention_weight = 1.0 + float(loss_cfg.get("future_hotspot_sun_weight", 2.0)) * (attention / attention_scale)
-            per_sample = (torch.abs(pred_hotspot - target_hotspot) * attention_weight).mean(dim=(1, 2, 3))
-            future_hotspot_loss = (per_sample * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+            attention_weight = 1.0 + float(loss_cfg.get("rbr_distribution_sun_weight", loss_cfg.get("future_hotspot_sun_weight", 2.0))) * (attention / attention_scale)
+            pixel_nll = 0.5 * (torch.exp(-pred_logvar) * (target_rbr - pred_mean).pow(2) + pred_logvar)
+            per_sample_nll = (pixel_nll * attention_weight).mean(dim=(1, 2, 3))
+            per_sample_l1 = torch.abs(pred_mean - target_rbr).mean(dim=(1, 2, 3))
+            future_rbr_nll = (per_sample_nll * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+            future_rbr_l1 = (per_sample_l1 * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
 
     return {
-        "cloud_mask": cloud_mask_loss,
-        "future_hotspot": future_hotspot_loss,
-        "total": (
-            float(loss_cfg.get("cloud_mask_weight", 0.0)) * cloud_mask_loss
-            + float(loss_cfg.get("future_hotspot_weight", 0.0)) * future_hotspot_loss
-        ),
+        "future_rbr_nll": future_rbr_nll,
+        "future_rbr_l1": future_rbr_l1,
+        "total": float(loss_cfg.get("rbr_distribution_weight", 0.0)) * future_rbr_nll,
     }
 
 
-def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunConditionedCloudDataset, sample_index: int, device: torch.device) -> dict[str, np.ndarray | str]:
+def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunConditionedCloudDataset, sample_index: int, device: torch.device) -> dict:
     model.eval()
     raw = dataset[sample_index]
     batch = {k: v.unsqueeze(0).to(device) if torch.is_tensor(v) else v for k, v in raw.items()}
     with torch.no_grad():
         out = model(batch["images"], batch["pv_history"], batch["solar_vec"], sun_xy=batch["sun_xy"], target_sun_xy=batch["target_sun_xy"])
     frame = dataset.df.iloc[sample_index]
+    pred_quantiles = out["prediction"][0].detach().cpu().numpy()
     return {
         "image": batch["images"][0, -1, :3].detach().cpu().numpy(),
         "attention": out["attention_map"][0, 0].detach().cpu().numpy(),
-        "current_cloud_prob": out["current_cloud_prob"][0, 0].detach().cpu().numpy(),
-        "future_cloud_prob": out["future_cloud_prob_15min"][0, 0].detach().cpu().numpy(),
-        "future_sun_cloud_prob": out["future_sun_cloud_prob"][0].detach().cpu().numpy(),
-        "cloud_mask": batch["cloud_mask"][0, 0].detach().cpu().numpy(),
-        "cloud_mask_valid": bool(batch["cloud_mask_valid"][0].detach().cpu().item() > 0.0),
-        "change_hotspot": out["future_change_hotspot_15min"][0, 0].detach().cpu().numpy(),
-        "future_cloud_uncertainty": out["future_cloud_uncertainty_15min"][0, 0].detach().cpu().numpy(),
+        "rbr_mean": out["future_rbr_mean_15min"][0, 0].detach().cpu().numpy(),
+        "rbr_variance": out["future_rbr_variance_15min"][0, 0].detach().cpu().numpy(),
         "past_rbr_change_hotspot": batch["past_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
         "future_rbr_change_hotspot": batch["future_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
         "future_hotspot_valid": bool(batch["future_hotspot_valid"][0].detach().cpu().item() > 0.0),
+        "summary_values": {
+            "q90-q10": float(pred_quantiles[4] - pred_quantiles[0]),
+            "pv sigma": float(out["pv_sigma"][0, 0].detach().cpu().item()),
+            "sun mean": float(out["sun_local_rbr_mean"][0, 0].detach().cpu().item()),
+            "sun var": float(out["sun_local_rbr_variance"][0, 0].detach().cpu().item()),
+        },
         "title": str(frame["ts_target"]),
     }
 
@@ -215,10 +205,16 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
             pred_w = _target_to_w(pred, clear_sky_w[:, None], use_csi)
             target_w = data["target_pv_w"].cpu().numpy()
             meta_idx = data["meta_index"].cpu().numpy()
-            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], out["future_change_hotspot_15min"]).clamp(0.0, 1.0)
-            pred_hotspot = out["future_change_hotspot_15min"].clamp(0.0, 1.0)
-            hotspot_l1 = torch.abs(pred_hotspot - target_hotspot).mean(dim=(1, 2, 3)).cpu().numpy()
-            pred_flat = pred_hotspot.flatten(1)
+            interval_width = pred[:, 4] - pred[:, 0]
+            pv_sigma = out["pv_sigma"].cpu().numpy().reshape(-1)
+            global_rbr_mean = out["global_rbr_mean"].cpu().numpy().reshape(-1)
+            sun_local_rbr_mean = out["sun_local_rbr_mean"].cpu().numpy().reshape(-1)
+            global_rbr_variance = out["global_rbr_variance"].cpu().numpy().reshape(-1)
+            sun_local_rbr_variance = out["sun_local_rbr_variance"].cpu().numpy().reshape(-1)
+            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], out["future_rbr_mean_15min"]).clamp(0.0, 1.0)
+            pred_mean = out["future_rbr_mean_15min"].clamp(0.0, 1.0)
+            rbr_l1 = torch.abs(pred_mean - target_hotspot).mean(dim=(1, 2, 3)).cpu().numpy()
+            pred_flat = pred_mean.flatten(1)
             target_flat = target_hotspot.flatten(1)
             pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
             target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
@@ -237,22 +233,34 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
                         "target_pv_w": float(target_w[i]),
                         "target_clear_sky_w": float(clear_sky_w[i]),
                         "q10": float(pred[i, 0]),
-                        "q50": float(pred[i, 1]),
-                        "q90": float(pred[i, 2]),
+                        "q25": float(pred[i, 1]),
+                        "q50": float(pred[i, 2]),
+                        "q75": float(pred[i, 3]),
+                        "q90": float(pred[i, 4]),
                         "q10_w": float(pred_w[i, 0]),
-                        "q50_w": float(pred_w[i, 1]),
-                        "q90_w": float(pred_w[i, 2]),
+                        "q25_w": float(pred_w[i, 1]),
+                        "q50_w": float(pred_w[i, 2]),
+                        "q75_w": float(pred_w[i, 3]),
+                        "q90_w": float(pred_w[i, 4]),
+                        "interval_width": float(interval_width[i]),
+                        "pv_sigma": float(pv_sigma[i]),
+                        "global_rbr_mean": float(global_rbr_mean[i]),
+                        "sun_local_rbr_mean": float(sun_local_rbr_mean[i]),
+                        "global_rbr_variance": float(global_rbr_variance[i]),
+                        "sun_local_rbr_variance": float(sun_local_rbr_variance[i]),
                         "smart_persistence_w": float(smart_persistence_w[int(meta_idx[i])]),
-                        "future_hotspot_l1": float(hotspot_l1[i]) if float(hotspot_valid[i]) > 0 else np.nan,
-                        "future_hotspot_corr": float(hotspot_corr[i]) if float(hotspot_valid[i]) > 0 else np.nan,
+                        "future_rbr_l1": float(rbr_l1[i]) if float(hotspot_valid[i]) > 0 else np.nan,
+                        "future_rbr_corr": float(hotspot_corr[i]) if float(hotspot_valid[i]) > 0 else np.nan,
                         "sample_index": int(meta_idx[i]),
                     }
                 )
     pred_df = pd.DataFrame(rows).sort_values("ts_target").reset_index(drop=True)
     metrics = regression_metrics(pred_df["q50_w"].to_numpy(dtype=np.float32), pred_df["target_pv_w"].to_numpy(dtype=np.float32))
     metrics["n_samples"] = int(len(pred_df))
-    metrics["future_hotspot_l1"] = float(pred_df["future_hotspot_l1"].mean()) if "future_hotspot_l1" in pred_df else float("nan")
-    metrics["future_hotspot_corr"] = float(pred_df["future_hotspot_corr"].mean()) if "future_hotspot_corr" in pred_df else float("nan")
+    metrics["future_rbr_l1"] = float(pred_df["future_rbr_l1"].mean()) if "future_rbr_l1" in pred_df else float("nan")
+    metrics["future_rbr_corr"] = float(pred_df["future_rbr_corr"].mean()) if "future_rbr_corr" in pred_df else float("nan")
+    metrics["interval_width_vs_sun_variance_corr"] = float(pred_df["interval_width"].corr(pred_df["sun_local_rbr_variance"])) if len(pred_df) > 1 else float("nan")
+    metrics["interval_width_vs_global_variance_corr"] = float(pred_df["interval_width"].corr(pred_df["global_rbr_variance"])) if len(pred_df) > 1 else float("nan")
     return pred_df, metrics
 
 
@@ -275,30 +283,10 @@ def train_model(config: dict) -> Path:
             image_size=tuple(config["data"]["image_size"]),
             sky_mask_path=config["data"].get("sky_mask_path"),
             peak_power_w=float(config["data"]["peak_power_w"]),
-            cloud_mask_manifest_path=config["data"].get("cloud_mask_manifest_path"),
-            cloud_mask_sky_mask_path=config["data"].get("cloud_mask_sky_mask_path", config["data"].get("sky_mask_path")),
         )
         for split in ("train", "val", "test")
     }
     logger.info("Dataset sizes train=%d val=%d test=%d", len(datasets["train"]), len(datasets["val"]), len(datasets["test"]))
-    for split_name, split_ds in datasets.items():
-        if split_ds.cloud_mask_supervisor is not None:
-            logger.info("Cloud-mask manifest %s resolved to %s", split_name, split_ds.cloud_mask_supervisor.manifest_path)
-        valid_masks, total_masks = split_ds.cloud_mask_coverage()
-        logger.info("Cloud-mask coverage %s=%d/%d", split_name, valid_masks, total_masks)
-        if split_name == "train" and float(config["loss"].get("cloud_mask_weight", 0.0)) > 0.0 and valid_masks == 0:
-            sample_key = "<empty train split>"
-            if len(split_ds.df) > 0:
-                sample_paths = _parse_jsonish(split_ds.df.iloc[0]["img_paths"])
-                sample_key = Path(str(sample_paths[-1])).name
-            manifest_keys = []
-            if split_ds.cloud_mask_supervisor is not None:
-                manifest_keys = split_ds.cloud_mask_supervisor.available_keys()[:5]
-            raise RuntimeError(
-                "cloud_mask_weight is > 0 but no train samples matched cloud masks. "
-                f"Check data.cloud_mask_manifest_path and image path roots. "
-                f"First train current-frame key={sample_key!r}; first manifest keys={manifest_keys!r}."
-            )
     persistence_by_split = {split_name: _persistence_metrics(split_ds) for split_name, split_ds in datasets.items()}
     smart_persistence_by_split = {split_name: _smart_persistence_metrics(split_ds, config) for split_name, split_ds in datasets.items()}
     for split_name, metrics in persistence_by_split.items():
@@ -320,7 +308,7 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "recon": [], "cloud_mask": [], "future_hotspot": []}
+        epoch_stats = {"total": [], "pv": [], "kl": [], "recon": [], "future_rbr_nll": [], "future_rbr_l1": []}
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -330,7 +318,8 @@ def train_model(config: dict) -> Path:
             out = model(data["images"], data["pv_history"], data["solar_vec"], sun_xy=data["sun_xy"], target_sun_xy=data["target_sun_xy"])
             target_rbr = F.interpolate(data["target_rbr"], size=out["recon_rbr"].shape[-2:], mode="bilinear", align_corners=False)
             losses = scsn_training_loss(
-                prediction=out["prediction"],
+                pv_mu=out["pv_mu"],
+                pv_logvar=out["pv_logvar"],
                 target=data["target"],
                 kl_loss=out["kl_loss"],
                 recon_rbr=out["recon_rbr"],
@@ -347,7 +336,7 @@ def train_model(config: dict) -> Path:
             for key in epoch_stats:
                 epoch_stats[key].append(float(losses[key].detach().cpu()))
 
-            q50 = out["prediction"][:, 1].detach().cpu().numpy()
+            q50 = out["prediction"][:, 2].detach().cpu().numpy()
             q50_w = _target_to_w(q50, data["target_clear_sky_w"].detach().cpu().numpy(), use_csi)
             train_pred_w.append(q50_w.astype(np.float32))
             train_target_w.append(data["target_pv_w"].detach().cpu().numpy().astype(np.float32))
@@ -361,8 +350,8 @@ def train_model(config: dict) -> Path:
             "train_pv_loss": float(np.mean(epoch_stats["pv"])),
             "train_kl_loss": float(np.mean(epoch_stats["kl"])),
             "train_recon_loss": float(np.mean(epoch_stats["recon"])),
-            "train_cloud_mask_loss": float(np.mean(epoch_stats["cloud_mask"])),
-            "train_future_hotspot_loss": float(np.mean(epoch_stats["future_hotspot"])),
+            "train_future_rbr_nll": float(np.mean(epoch_stats["future_rbr_nll"])),
+            "train_future_rbr_l1": float(np.mean(epoch_stats["future_rbr_l1"])),
             "train_mae_w": float(train_metrics["mae"]),
             "train_rmse_w": float(train_metrics["rmse"]),
             "val_mae_w": float(val_metrics["mae"]),
@@ -419,17 +408,13 @@ def train_model(config: dict) -> Path:
             save_scsn_state_figure(
                 image=item["image"],
                 attention=item["attention"],
-                current_cloud_prob=item["current_cloud_prob"],
-                future_cloud_prob=item["future_cloud_prob"],
-                change_hotspot=item["change_hotspot"],
+                rbr_mean=item["rbr_mean"],
+                rbr_variance=item["rbr_variance"],
                 past_rbr_change_hotspot=item["past_rbr_change_hotspot"],
                 future_rbr_change_hotspot=item["future_rbr_change_hotspot"],
-                future_sun_cloud_prob=item["future_sun_cloud_prob"],
                 out_path=run_dir / "figures" / f"cloud_state_{split_name}_{idx:02d}.png",
                 title=str(item["title"]),
-                cloud_mask=item["cloud_mask"],
-                cloud_mask_valid=bool(item["cloud_mask_valid"]),
                 future_hotspot_valid=bool(item["future_hotspot_valid"]),
-                future_cloud_uncertainty=item["future_cloud_uncertainty"],
+                summary_values=item["summary_values"],
             )
     return run_dir

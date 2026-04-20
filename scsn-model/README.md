@@ -32,10 +32,10 @@ scsn-model/
 - 编码：`Image Encoder + ConvLSTM`
 - 结构化潜变量：`z_dynamics`
 - 动力学：`Variational GRU`
-- 解码：未来15步的 `cloud probability / RBR change hotspot / sun-region cloud probability`
-- 预测头：输出`q10 / q50 / q90`
-- 训练损失：`Pinball + quantile crossing + KL + RBR reconstruction + future RBR change hotspot`
-- 弱监督：可选读取 cloud-mask manifest，按输入末帧匹配 cloudy/clear 图对，重算 cloud mask 后只作为当前 `cloud probability` 的轻量 prior
+- 解码：未来15步 pixel-level `RBR variation mean / log-variance`
+- 预测头：输出 PV 高斯分布的 `mu / sigma`，再确定性得到 `q10 / q25 / q50 / q75 / q90`
+- 训练损失：`PV Gaussian NLL + KL + RBR reconstruction + future RBR variation Gaussian NLL`
+- 弱监督：不再使用 cloud-mask/pseudo-mask supervision；`sky_mask_path` 只作为有效天空区域 mask
 
 ## 使用方法
 
@@ -88,16 +88,13 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
 - 旧版特征聚合拼装方式
 - 任何依赖旧最小基线设计的模型分支
 
-`cloud_state_*.png`会展示输入末帧、太阳注意力、当前云概率、15min 云风险、过去/未来 RBR 变化 hotspot、预测 15min hotspot、可用的 pseudo cloud mask 和太阳区域风险摘要，避免把不可验证的 `transmission / opacity / gap` 空间图当作强物理解释。
+`cloud_state_*.png`会展示输入末帧、目标太阳区域权重、过去/未来 RBR variation、预测的 future RBR mean、预测的 future RBR variance、对应 overlay 和 PV 分布诊断。所有彩色 map 都带 colorbar。不可验证的 `transmission / opacity / gap / future cloud probability / cloud risk / sun occlusion` 空间图已经移除。
 
-## Cloud Mask 弱监督
+## RBR Variation 概率监督
 
 `configs/base.json` 和 `configs/experiment_no_sun_attention.json` 默认启用了：
 
-- `data.cloud_mask_manifest_path`: `/Users/huangchouyue/Projects/PVPF/data/cloud_mask_ref/manifests/hourly_summary.csv`
-- `data.cloud_mask_sky_mask_path`: `/Users/huangchouyue/Projects/PVPF/data/sky_mask.png`
-- `loss.cloud_mask_weight`: `0.02`
-- `loss.cloud_fraction_weight`: `0.10`
-- `loss.future_hotspot_weight`: `0.20`
+- `loss.rbr_distribution_weight`: `0.20`
+- `loss.rbr_distribution_sun_weight`: `2.0`
 
-训练时只有能按输入序列末帧文件名命中 manifest 的样本会计算 cloud-mask loss；没有 cloud mask 的样本保持原来的训练逻辑。Cloud mask 只作为轻量 current-cloud prior；未来 15 分钟的变化解释主要由相邻帧 RBR change hotspot 和 PV loss 约束。`transmission / opacity / gap` 这类不可验证的物理 decoder 已移除，避免 noisy mask 被强行解释成像素级光学状态。模型不再预测显式运动方向，也不再使用 current-sun latent attention；太阳注意力只在未来目标太阳位置附近做风险读出与 hotspot loss 加权。
+未来 15 分钟的 target 来自真实未来 15 张图的相邻帧 RBR variation。模型预测每个 pixel 的 mean 和 variance，并用 Gaussian NLL 训练；PV head 使用 sun-region/global 的 RBR mean 和 variance 生成 PV 分布。模型不再预测显式运动方向，也不再使用 current-sun latent attention；太阳权重只在未来目标太阳位置附近做 RBR variation 读出与 NLL 加权。

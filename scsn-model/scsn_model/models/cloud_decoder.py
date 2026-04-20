@@ -30,19 +30,8 @@ class FutureCloudStateDecoder(nn.Module):
             ResidualConvBlock(trunk_channels),
             ResidualConvBlock(trunk_channels),
         )
-        self.change_hotspot_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
-        self.cloud_prob_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
-        self.sun_occ_decoder = nn.Sequential(
-            nn.Linear(latent_dim + hidden_dim, 64),
-            nn.GELU(),
-            nn.Linear(64, 1),
-        )
-        self.current_state_head = nn.Sequential(
-            nn.Conv2d(spatial_dim, trunk_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            ResidualConvBlock(trunk_channels),
-        )
-        self.current_cloud_prob = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.rbr_mean_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
+        self.rbr_logvar_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
 
     def forward(self, future_z: torch.Tensor, hidden_seq: torch.Tensor, spatial_feat: torch.Tensor) -> dict[str, torch.Tensor]:
         batch, steps, _ = future_z.shape
@@ -51,15 +40,9 @@ class FutureCloudStateDecoder(nn.Module):
         z_map = future_z.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.feature_hw, self.feature_hw)
         decoder_in = torch.cat([spatial_rep, z_map, hidden_map], dim=2).reshape(batch * steps, -1, self.feature_hw, self.feature_hw)
         trunk = self.input_proj(decoder_in)
-        change_hotspot = torch.sigmoid(self.change_hotspot_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
-        cloud_prob = torch.sigmoid(self.cloud_prob_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
-        sun_occ_in = torch.cat([future_z, hidden_seq], dim=-1)
-        sun_occ = torch.sigmoid(self.sun_occ_decoder(sun_occ_in)).squeeze(-1)
-
-        current_feat = self.current_state_head(spatial_feat)
+        rbr_mean = torch.sigmoid(self.rbr_mean_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
+        rbr_logvar = self.rbr_logvar_head(trunk).clamp(min=-7.0, max=3.0).view(batch, steps, 1, self.feature_hw, self.feature_hw)
         return {
-            "future_change_hotspot_maps": change_hotspot,
-            "sun_occlusion": sun_occ,
-            "future_cloud_prob_maps": cloud_prob,
-            "current_cloud_prob": torch.sigmoid(self.current_cloud_prob(current_feat)),
+            "future_rbr_mean_maps": rbr_mean,
+            "future_rbr_logvar_maps": rbr_logvar,
         }
