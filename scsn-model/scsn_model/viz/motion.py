@@ -19,6 +19,20 @@ def _resize_map(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     return np.asarray(im.resize((shape[1], shape[0]), resample=Image.BILINEAR), dtype=np.float32)
 
 
+def _format_risk_summary(values: np.ndarray) -> list[str]:
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return ["15min sun-region risk", "missing"]
+    return [
+        "15min sun-region risk",
+        f"mean: {float(values.mean()):.3f}",
+        f"min:  {float(values.min()):.3f}",
+        f"max:  {float(values.max()):.3f}",
+        f"std:  {float(values.std()):.3f}",
+    ]
+
+
 def save_scsn_state_figure(
     image: np.ndarray,
     attention: np.ndarray,
@@ -110,11 +124,19 @@ def save_scsn_state_figure(
     axes[2, 2].set_title("Predicted Hotspot Overlay")
     axes[2, 2].axis("off")
 
-    axes[2, 3].plot(np.arange(1, len(future_sun_cloud_prob) + 1), future_sun_cloud_prob, color="tab:blue", linewidth=1.8)
-    axes[2, 3].set_ylim(0.0, 1.0)
-    axes[2, 3].set_title("Sun-Region Cloud Risk")
-    axes[2, 3].set_xlabel("Forecast Step")
-    axes[2, 3].grid(alpha=0.25)
+    axes[2, 3].axis("off")
+    axes[2, 3].set_title("Sun-Region Risk Summary")
+    summary_lines = _format_risk_summary(future_sun_cloud_prob)
+    axes[2, 3].text(
+        0.08,
+        0.72,
+        "\n".join(summary_lines),
+        transform=axes[2, 3].transAxes,
+        va="top",
+        ha="left",
+        fontsize=12,
+        family="monospace",
+    )
 
     fig.suptitle(title)
     fig.savefig(out_path, dpi=160)
