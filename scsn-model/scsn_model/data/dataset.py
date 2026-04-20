@@ -65,6 +65,7 @@ class SunConditionedCloudDataset(Dataset):
         self.df["ts_target"] = pd.to_datetime(self.df["ts_target"])
         self.df = self.df[self.df["split"] == split].reset_index(drop=True)
         self.image_size = tuple(int(v) for v in image_size)
+        self.rbr_hotspot_min_p95 = 0.015
         resolved_sky_mask_path = resolve_existing_path(sky_mask_path) if sky_mask_path else None
         if resolved_sky_mask_path and not resolved_sky_mask_path.exists():
             raise FileNotFoundError(f"Sky mask not found: {sky_mask_path} (resolved to {resolved_sky_mask_path})")
@@ -215,7 +216,7 @@ class SunConditionedCloudDataset(Dataset):
         if self.mask is not None:
             hotspot = hotspot * self.mask
         scale = float(np.percentile(hotspot, 95))
-        if scale <= 1e-6:
+        if scale < self.rbr_hotspot_min_p95:
             return np.zeros_like(hotspot, dtype=np.float32)
         return np.clip(hotspot / scale, 0.0, 1.0).astype(np.float32)
 

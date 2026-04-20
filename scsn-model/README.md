@@ -88,15 +88,16 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
 - 旧版特征聚合拼装方式
 - 任何依赖旧最小基线设计的模型分支
 
-`cloud_state_*.png`会展示输入末帧、太阳注意力、当前/未来云概率、可用的 pseudo cloud mask、未来运动场、太阳区域未来云概率曲线和未来云不确定性，避免把不可验证的 `transmission / opacity / gap` 空间图当作强物理解释。
+`cloud_state_*.png`会展示输入末帧、太阳注意力、当前云概率、15min 云风险、过去/未来 RBR 变化 hotspot、预测 15min hotspot、可用的 pseudo cloud mask 和太阳区域风险摘要，避免把不可验证的 `transmission / opacity / gap` 空间图当作强物理解释。
 
 ## Cloud Mask 弱监督
 
 `configs/base.json` 和 `configs/experiment_no_sun_attention.json` 默认启用了：
 
-- `data.cloud_mask_manifest_path`: `/Users/huangchouyue/Projects/PVPF/cloud_seg/outputs_final/manifests/hourly_summary.csv`
+- `data.cloud_mask_manifest_path`: `/Users/huangchouyue/Projects/PVPF/data/cloud_mask_ref/manifests/hourly_summary.csv`
 - `data.cloud_mask_sky_mask_path`: `/Users/huangchouyue/Projects/PVPF/data/sky_mask.png`
-- `loss.cloud_mask_weight`: `0.05`
-- `loss.cloud_fraction_weight`: `0.25`
+- `loss.cloud_mask_weight`: `0.02`
+- `loss.cloud_fraction_weight`: `0.10`
+- `loss.future_hotspot_weight`: `0.05`
 
-训练时只有能按输入序列末帧文件名命中 manifest 的样本会计算这项 loss；没有 cloud mask 的样本保持原来的训练逻辑。`opacity_proxy / gap_proxy / transmission_proxy` 默认权重已设为 `0.0`，避免 noisy mask 被强行解释成像素级光学状态。
+训练时只有能按输入序列末帧文件名命中 manifest 的样本会计算 cloud-mask loss；没有 cloud mask 的样本保持原来的训练逻辑。Cloud mask 只作为轻量 current-cloud prior；未来 15 分钟的运动/变化解释主要由相邻帧 RBR change hotspot 和 PV loss 约束。`opacity_proxy / gap_proxy / transmission_proxy` 默认权重已设为 `0.0`，避免 noisy mask 被强行解释成像素级光学状态。

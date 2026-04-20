@@ -73,8 +73,8 @@
     "gap_proxy_weight": 0.0,
     "transmission_proxy_weight": 0.0,
     "motion_warp_weight": 0.10,
-    "cloud_mask_weight": 0.05,
-    "cloud_fraction_weight": 0.25,
+    "cloud_mask_weight": 0.02,
+    "cloud_fraction_weight": 0.10,
     "future_hotspot_weight": 0.05,
     "future_hotspot_sun_weight": 2.0,
     "grad_clip_norm": 5.0
