@@ -19,11 +19,10 @@ class ResidualConvBlock(nn.Module):
 
 
 class FutureCloudStateDecoder(nn.Module):
-    def __init__(self, spatial_dim: int, latent_dim: int, hidden_dim: int, sun_feat_dim: int, feature_hw: int, max_motion: float) -> None:
+    def __init__(self, spatial_dim: int, latent_dim: int, hidden_dim: int, feature_hw: int) -> None:
         super().__init__()
         self.feature_hw = feature_hw
-        self.max_motion = max_motion
-        in_channels = spatial_dim + latent_dim + hidden_dim + sun_feat_dim
+        in_channels = spatial_dim + latent_dim + hidden_dim
         trunk_channels = max(spatial_dim, 128)
         self.input_proj = nn.Sequential(
             nn.Conv2d(in_channels, trunk_channels, kernel_size=3, padding=1),
@@ -31,43 +30,35 @@ class FutureCloudStateDecoder(nn.Module):
             ResidualConvBlock(trunk_channels),
             ResidualConvBlock(trunk_channels),
         )
-        self.motion_head = nn.Conv2d(trunk_channels, 2, kernel_size=3, padding=1)
+        self.change_hotspot_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.cloud_prob_head = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
         self.sun_occ_decoder = nn.Sequential(
-            nn.Linear(latent_dim + hidden_dim + sun_feat_dim, 64),
+            nn.Linear(latent_dim + hidden_dim, 64),
             nn.GELU(),
             nn.Linear(64, 1),
         )
         self.current_state_head = nn.Sequential(
-            nn.Conv2d(spatial_dim + sun_feat_dim, trunk_channels, kernel_size=3, padding=1),
+            nn.Conv2d(spatial_dim, trunk_channels, kernel_size=3, padding=1),
             nn.GELU(),
             ResidualConvBlock(trunk_channels),
         )
         self.current_cloud_prob = nn.Conv2d(trunk_channels, 1, kernel_size=3, padding=1)
 
-    def forward(self, future_z: torch.Tensor, hidden_seq: torch.Tensor, spatial_feat: torch.Tensor, sun_local_feat: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, future_z: torch.Tensor, hidden_seq: torch.Tensor, spatial_feat: torch.Tensor) -> dict[str, torch.Tensor]:
         batch, steps, _ = future_z.shape
         spatial_rep = spatial_feat.unsqueeze(1).expand(-1, steps, -1, -1, -1)
         hidden_map = hidden_seq.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.feature_hw, self.feature_hw)
         z_map = future_z.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.feature_hw, self.feature_hw)
-        sun_map = sun_local_feat.unsqueeze(1).unsqueeze(-1).unsqueeze(-1).expand(-1, steps, -1, self.feature_hw, self.feature_hw)
-        decoder_in = torch.cat([spatial_rep, z_map, hidden_map, sun_map], dim=2).reshape(batch * steps, -1, self.feature_hw, self.feature_hw)
+        decoder_in = torch.cat([spatial_rep, z_map, hidden_map], dim=2).reshape(batch * steps, -1, self.feature_hw, self.feature_hw)
         trunk = self.input_proj(decoder_in)
-        motion = torch.tanh(self.motion_head(trunk)).view(batch, steps, 2, self.feature_hw, self.feature_hw) * self.max_motion
+        change_hotspot = torch.sigmoid(self.change_hotspot_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
         cloud_prob = torch.sigmoid(self.cloud_prob_head(trunk)).view(batch, steps, 1, self.feature_hw, self.feature_hw)
-        sun_occ_in = torch.cat([future_z, hidden_seq, sun_local_feat.unsqueeze(1).expand(-1, steps, -1)], dim=-1)
+        sun_occ_in = torch.cat([future_z, hidden_seq], dim=-1)
         sun_occ = torch.sigmoid(self.sun_occ_decoder(sun_occ_in)).squeeze(-1)
 
-        current_in = torch.cat(
-            [
-                spatial_feat,
-                sun_local_feat.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, self.feature_hw, self.feature_hw),
-            ],
-            dim=1,
-        )
-        current_feat = self.current_state_head(current_in)
+        current_feat = self.current_state_head(spatial_feat)
         return {
-            "motion_fields": motion,
+            "future_change_hotspot_maps": change_hotspot,
             "sun_occlusion": sun_occ,
             "future_cloud_prob_maps": cloud_prob,
             "current_cloud_prob": torch.sigmoid(self.current_cloud_prob(current_feat)),

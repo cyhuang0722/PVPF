@@ -38,7 +38,7 @@ def save_scsn_state_figure(
     attention: np.ndarray,
     current_cloud_prob: np.ndarray,
     future_cloud_prob: np.ndarray,
-    motion_hotspot: np.ndarray,
+    change_hotspot: np.ndarray,
     past_rbr_change_hotspot: np.ndarray,
     future_rbr_change_hotspot: np.ndarray,
     future_sun_cloud_prob: np.ndarray,
@@ -56,7 +56,7 @@ def save_scsn_state_figure(
     image_shape = rgb.shape[:2]
     attention_overlay = _resize_map(attention, image_shape)
     past_change_overlay = _resize_map(past_rbr_change_hotspot, image_shape)
-    motion_overlay = _resize_map(motion_hotspot, image_shape)
+    change_overlay = _resize_map(change_hotspot, image_shape)
     if future_cloud_uncertainty is None:
         future_cloud_uncertainty = 4.0 * future_cloud_prob * (1.0 - future_cloud_prob)
 
@@ -91,14 +91,14 @@ def save_scsn_state_figure(
         axes[1, 1].set_title("Observed Future RBR Change")
         _add_colorbar(fig, future_change_im, axes[1, 1], "relative change", ticks=[0.0, 0.5, 1.0])
     else:
-        axes[1, 1].imshow(np.zeros_like(motion_hotspot), cmap="magma", vmin=0.0, vmax=1.0)
+        axes[1, 1].imshow(np.zeros_like(change_hotspot), cmap="magma", vmin=0.0, vmax=1.0)
         axes[1, 1].set_title("Observed Future RBR Change (missing)")
     axes[1, 1].axis("off")
 
-    motion_im = axes[1, 2].imshow(motion_hotspot, cmap="inferno", vmin=0.0, vmax=1.0)
-    axes[1, 2].set_title("Predicted 15min Motion Hotspot")
+    change_im = axes[1, 2].imshow(change_hotspot, cmap="inferno", vmin=0.0, vmax=1.0)
+    axes[1, 2].set_title("Predicted 15min RBR Change")
     axes[1, 2].axis("off")
-    _add_colorbar(fig, motion_im, axes[1, 2], "relative activity", ticks=[0.0, 0.5, 1.0])
+    _add_colorbar(fig, change_im, axes[1, 2], "relative change", ticks=[0.0, 0.5, 1.0])
 
     uncertainty_im = axes[1, 3].imshow(future_cloud_uncertainty, cmap="cividis", vmin=0.0, vmax=1.0)
     axes[1, 3].set_title("Predicted 15min Risk/Uncertainty")
@@ -120,8 +120,8 @@ def save_scsn_state_figure(
     axes[2, 1].axis("off")
 
     axes[2, 2].imshow(rgb)
-    axes[2, 2].imshow(motion_overlay, cmap="inferno", alpha=0.45, vmin=0.0, vmax=1.0)
-    axes[2, 2].set_title("Predicted Hotspot Overlay")
+    axes[2, 2].imshow(change_overlay, cmap="inferno", alpha=0.45, vmin=0.0, vmax=1.0)
+    axes[2, 2].set_title("Predicted Change Overlay")
     axes[2, 2].axis("off")
 
     axes[2, 3].axis("off")

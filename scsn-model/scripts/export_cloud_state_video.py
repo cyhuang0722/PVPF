@@ -65,7 +65,7 @@ def main() -> None:
             attention=out["attention_map"][0, 0].detach().cpu().numpy(),
             current_cloud_prob=out["current_cloud_prob"][0, 0].detach().cpu().numpy(),
             future_cloud_prob=out["future_cloud_prob_15min"][0, 0].detach().cpu().numpy(),
-            motion_hotspot=out["future_motion_hotspot_15min"][0, 0].detach().cpu().numpy(),
+            change_hotspot=out["future_change_hotspot_15min"][0, 0].detach().cpu().numpy(),
             past_rbr_change_hotspot=batch["past_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
             future_rbr_change_hotspot=batch["future_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
             future_sun_cloud_prob=out["future_sun_cloud_prob"][0].detach().cpu().numpy(),

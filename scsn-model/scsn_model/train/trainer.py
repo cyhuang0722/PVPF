@@ -25,7 +25,6 @@ except ModuleNotFoundError:
         prediction: torch.Tensor,
         target: torch.Tensor,
         kl_loss: torch.Tensor,
-        motion_reg_loss: torch.Tensor,
         recon_rbr: torch.Tensor,
         target_rbr: torch.Tensor,
         loss_cfg: dict,
@@ -36,14 +35,12 @@ except ModuleNotFoundError:
         total = (
             float(loss_cfg.get("pv_weight", 1.0)) * pv_loss
             + float(loss_cfg.get("kl_weight", 0.02)) * kl_loss
-            + float(loss_cfg.get("motion_weight", 0.01)) * motion_reg_loss
             + float(loss_cfg.get("reconstruction_weight", 0.2)) * recon_loss
         )
         return {
             "total": total,
             "pv": pv_loss,
             "kl": kl_loss,
-            "motion": motion_reg_loss,
             "recon": recon_loss,
         }
 
@@ -141,32 +138,8 @@ def _resize_like(tensor: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
     return F.interpolate(tensor, size=reference.shape[-2:], mode="bilinear", align_corners=False)
 
 
-def _make_sampling_grid(flow: torch.Tensor) -> torch.Tensor:
-    batch, _, height, width = flow.shape
-    device = flow.device
-    yy, xx = torch.meshgrid(
-        torch.linspace(-1.0, 1.0, height, device=device),
-        torch.linspace(-1.0, 1.0, width, device=device),
-        indexing="ij",
-    )
-    base_grid = torch.stack([xx, yy], dim=-1).unsqueeze(0).expand(batch, -1, -1, -1)
-    flow_x = flow[:, 0] * (2.0 / max(width - 1, 1))
-    flow_y = flow[:, 1] * (2.0 / max(height - 1, 1))
-    return torch.stack([base_grid[..., 0] - flow_x, base_grid[..., 1] - flow_y], dim=-1)
-
-
-def _warp_with_flow(image: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
-    return F.grid_sample(image, _make_sampling_grid(flow), mode="bilinear", padding_mode="border", align_corners=True)
-
-
 def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, torch.Tensor], loss_cfg: dict) -> dict[str, torch.Tensor]:
     current_cloud_prob = output["current_cloud_prob"]
-
-    prev_rbr = _resize_like(data["prev_rbr"], current_cloud_prob)
-    curr_rbr = _resize_like(data["target_rbr"], current_cloud_prob)
-    flow_now = output["motion_fields"][:, 0]
-    warped_prev = _warp_with_flow(prev_rbr, flow_now)
-    motion_warp_loss = F.l1_loss(warped_prev, curr_rbr)
 
     cloud_mask_loss = current_cloud_prob.new_zeros(())
     if "cloud_mask" in data and "cloud_mask_valid" in data:
@@ -185,7 +158,7 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
     if "future_rbr_change_hotspot" in data and "future_hotspot_valid" in data:
         valid = data["future_hotspot_valid"].view(-1, 1, 1, 1)
         if torch.any(valid > 0):
-            pred_hotspot = output.get("future_motion_hotspot_15min", output["future_motion_hotspot_maps"].mean(dim=1))
+            pred_hotspot = output["future_change_hotspot_15min"]
             target_hotspot = _resize_like(data["future_rbr_change_hotspot"], pred_hotspot).clamp(0.0, 1.0)
             attention = output["attention_map"].detach()
             attention_scale = attention.flatten(1).amax(dim=1).view(-1, 1, 1, 1).clamp_min(1e-6)
@@ -194,12 +167,10 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
             future_hotspot_loss = (per_sample * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
 
     return {
-        "motion_warp": motion_warp_loss,
         "cloud_mask": cloud_mask_loss,
         "future_hotspot": future_hotspot_loss,
         "total": (
-            float(loss_cfg.get("motion_warp_weight", 0.10)) * motion_warp_loss
-            + float(loss_cfg.get("cloud_mask_weight", 0.0)) * cloud_mask_loss
+            float(loss_cfg.get("cloud_mask_weight", 0.0)) * cloud_mask_loss
             + float(loss_cfg.get("future_hotspot_weight", 0.0)) * future_hotspot_loss
         ),
     }
@@ -220,7 +191,7 @@ def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunCo
         "future_sun_cloud_prob": out["future_sun_cloud_prob"][0].detach().cpu().numpy(),
         "cloud_mask": batch["cloud_mask"][0, 0].detach().cpu().numpy(),
         "cloud_mask_valid": bool(batch["cloud_mask_valid"][0].detach().cpu().item() > 0.0),
-        "motion_hotspot": out["future_motion_hotspot_15min"][0, 0].detach().cpu().numpy(),
+        "change_hotspot": out["future_change_hotspot_15min"][0, 0].detach().cpu().numpy(),
         "future_cloud_uncertainty": out["future_cloud_uncertainty_15min"][0, 0].detach().cpu().numpy(),
         "past_rbr_change_hotspot": batch["past_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
         "future_rbr_change_hotspot": batch["future_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
@@ -244,8 +215,8 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
             pred_w = _target_to_w(pred, clear_sky_w[:, None], use_csi)
             target_w = data["target_pv_w"].cpu().numpy()
             meta_idx = data["meta_index"].cpu().numpy()
-            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], out["future_motion_hotspot_15min"]).clamp(0.0, 1.0)
-            pred_hotspot = out["future_motion_hotspot_15min"].clamp(0.0, 1.0)
+            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], out["future_change_hotspot_15min"]).clamp(0.0, 1.0)
+            pred_hotspot = out["future_change_hotspot_15min"].clamp(0.0, 1.0)
             hotspot_l1 = torch.abs(pred_hotspot - target_hotspot).mean(dim=(1, 2, 3)).cpu().numpy()
             pred_flat = pred_hotspot.flatten(1)
             target_flat = target_hotspot.flatten(1)
@@ -349,7 +320,7 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "motion": [], "recon": [], "motion_warp": [], "cloud_mask": [], "future_hotspot": []}
+        epoch_stats = {"total": [], "pv": [], "kl": [], "recon": [], "cloud_mask": [], "future_hotspot": []}
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -362,7 +333,6 @@ def train_model(config: dict) -> Path:
                 prediction=out["prediction"],
                 target=data["target"],
                 kl_loss=out["kl_loss"],
-                motion_reg_loss=out["motion_reg_loss"],
                 recon_rbr=out["recon_rbr"],
                 target_rbr=target_rbr,
                 loss_cfg=config["loss"],
@@ -390,9 +360,7 @@ def train_model(config: dict) -> Path:
             "train_loss": float(np.mean(epoch_stats["total"])),
             "train_pv_loss": float(np.mean(epoch_stats["pv"])),
             "train_kl_loss": float(np.mean(epoch_stats["kl"])),
-            "train_motion_loss": float(np.mean(epoch_stats["motion"])),
             "train_recon_loss": float(np.mean(epoch_stats["recon"])),
-            "train_motion_warp_loss": float(np.mean(epoch_stats["motion_warp"])),
             "train_cloud_mask_loss": float(np.mean(epoch_stats["cloud_mask"])),
             "train_future_hotspot_loss": float(np.mean(epoch_stats["future_hotspot"])),
             "train_mae_w": float(train_metrics["mae"]),
@@ -453,7 +421,7 @@ def train_model(config: dict) -> Path:
                 attention=item["attention"],
                 current_cloud_prob=item["current_cloud_prob"],
                 future_cloud_prob=item["future_cloud_prob"],
-                motion_hotspot=item["motion_hotspot"],
+                change_hotspot=item["change_hotspot"],
                 past_rbr_change_hotspot=item["past_rbr_change_hotspot"],
                 future_rbr_change_hotspot=item["future_rbr_change_hotspot"],
                 future_sun_cloud_prob=item["future_sun_cloud_prob"],

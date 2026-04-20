@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 
 class StructuredLatentState(nn.Module):
-    def __init__(self, in_dim: int, latent_dims: dict[str, int], spatial_dim: int, sun_feature_dim: int) -> None:
+    def __init__(self, in_dim: int, latent_dims: dict[str, int], spatial_dim: int) -> None:
         super().__init__()
         self.latent_dims = latent_dims
         self.spatial_proj = nn.Sequential(
@@ -15,13 +15,9 @@ class StructuredLatentState(nn.Module):
             nn.Conv2d(spatial_dim, spatial_dim, kernel_size=3, padding=1),
             nn.GELU(),
         )
-        self.sun_proj = nn.Sequential(
-            nn.Linear(spatial_dim, sun_feature_dim),
-            nn.GELU(),
-        )
         self.global_heads = nn.ModuleDict()
         for name, dim in latent_dims.items():
-            input_dim = in_dim if name != "sun" else sun_feature_dim
+            input_dim = in_dim
             self.global_heads[name] = nn.Sequential(
                 nn.Linear(input_dim, max(input_dim, dim * 2)),
                 nn.GELU(),
@@ -31,19 +27,14 @@ class StructuredLatentState(nn.Module):
     def forward(
         self,
         feature_map: torch.Tensor,
-        sun_attention: torch.Tensor,
     ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         pooled = F.adaptive_avg_pool2d(feature_map, output_size=1).flatten(1)
         spatial_feat = self.spatial_proj(feature_map)
-        sun_denom = sun_attention.sum(dim=(2, 3)).clamp_min(1e-6)
-        sun_local_feat = (spatial_feat * sun_attention).sum(dim=(2, 3)) / sun_denom
-        sun_local_feat = self.sun_proj(sun_local_feat)
         posterior: dict[str, dict[str, torch.Tensor]] = {}
         samples: dict[str, torch.Tensor] = {}
         kl_loss = pooled.new_zeros(pooled.shape[0])
         for name, head in self.global_heads.items():
-            source = sun_local_feat if name == "sun" else pooled
-            stats = head(source)
+            stats = head(pooled)
             mu, logvar = torch.chunk(stats, 2, dim=-1)
             logvar = logvar.clamp(min=-6.0, max=4.0)
             std = torch.exp(0.5 * logvar)
@@ -55,7 +46,6 @@ class StructuredLatentState(nn.Module):
         return {
             "pooled": pooled,
             "spatial_feat": spatial_feat,
-            "sun_local_feat": sun_local_feat,
             "posterior": posterior,
             "samples": samples,
             "kl_loss": kl_loss.mean(),

@@ -10,7 +10,6 @@ def scsn_training_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
     kl_loss: torch.Tensor,
-    motion_reg_loss: torch.Tensor,
     recon_rbr: torch.Tensor,
     target_rbr: torch.Tensor,
     loss_cfg: dict,
@@ -21,13 +20,11 @@ def scsn_training_loss(
     total = (
         float(loss_cfg.get("pv_weight", 1.0)) * pv_loss
         + float(loss_cfg.get("kl_weight", 0.02)) * kl_loss
-        + float(loss_cfg.get("motion_weight", 0.01)) * motion_reg_loss
         + float(loss_cfg.get("reconstruction_weight", 0.2)) * recon_loss
     )
     return {
         "total": total,
         "pv": pv_loss,
         "kl": kl_loss,
-        "motion": motion_reg_loss,
         "recon": recon_loss,
     }
