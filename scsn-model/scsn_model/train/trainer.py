@@ -141,26 +141,39 @@ def _resize_like(tensor: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
 
 def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, torch.Tensor], loss_cfg: dict) -> dict[str, torch.Tensor]:
     pred_mean = output["future_rbr_mean_15min"]
-    pred_logvar = output["future_rbr_logvar_15min"]
-    future_rbr_nll = pred_mean.new_zeros(())
-    future_rbr_l1 = pred_mean.new_zeros(())
-    if "future_rbr_variation" in data and "future_rbr_valid" in data:
+    pred_variance = output["future_rbr_variance_15min"]
+    future_rbr_mean_loss = pred_mean.new_zeros(())
+    future_rbr_variance_loss = pred_mean.new_zeros(())
+    future_rbr_mean_l1 = pred_mean.new_zeros(())
+    future_rbr_variance_l1 = pred_mean.new_zeros(())
+    if "future_rbr_mean" in data and "future_rbr_variance" in data and "future_rbr_valid" in data:
         valid = data["future_rbr_valid"].view(-1, 1, 1, 1)
         if torch.any(valid > 0):
-            target_rbr = _resize_like(data["future_rbr_variation"], pred_mean).clamp(0.0, 1.0)
+            target_mean = _resize_like(data["future_rbr_mean"], pred_mean).clamp(0.0, 1.0)
+            target_variance = _resize_like(data["future_rbr_variance"], pred_variance).clamp_min(0.0)
             attention = output["attention_map"].detach()
             attention_scale = attention.flatten(1).amax(dim=1).view(-1, 1, 1, 1).clamp_min(1e-6)
-            attention_weight = 1.0 + float(loss_cfg.get("rbr_distribution_sun_weight", 2.0)) * (attention / attention_scale)
-            pixel_nll = 0.5 * (torch.exp(-pred_logvar) * (target_rbr - pred_mean).pow(2) + pred_logvar)
-            per_sample_nll = (pixel_nll * attention_weight).mean(dim=(1, 2, 3))
-            per_sample_l1 = torch.abs(pred_mean - target_rbr).mean(dim=(1, 2, 3))
-            future_rbr_nll = (per_sample_nll * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
-            future_rbr_l1 = (per_sample_l1 * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+            attention_weight = 1.0 + float(loss_cfg.get("future_rbr_sun_weight", 2.0)) * (attention / attention_scale)
+            mean_pixel_loss = F.smooth_l1_loss(pred_mean, target_mean, reduction="none")
+            variance_pixel_loss = F.smooth_l1_loss(torch.log1p(pred_variance), torch.log1p(target_variance), reduction="none")
+            per_sample_mean_loss = (mean_pixel_loss * attention_weight).mean(dim=(1, 2, 3))
+            per_sample_variance_loss = (variance_pixel_loss * attention_weight).mean(dim=(1, 2, 3))
+            per_sample_mean_l1 = torch.abs(pred_mean - target_mean).mean(dim=(1, 2, 3))
+            per_sample_variance_l1 = torch.abs(pred_variance - target_variance).mean(dim=(1, 2, 3))
+            future_rbr_mean_loss = (per_sample_mean_loss * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+            future_rbr_variance_loss = (per_sample_variance_loss * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+            future_rbr_mean_l1 = (per_sample_mean_l1 * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
+            future_rbr_variance_l1 = (per_sample_variance_l1 * valid.view(-1)).sum() / valid.sum().clamp_min(1.0)
 
     return {
-        "future_rbr_nll": future_rbr_nll,
-        "future_rbr_l1": future_rbr_l1,
-        "total": float(loss_cfg.get("rbr_distribution_weight", 0.0)) * future_rbr_nll,
+        "future_rbr_mean_loss": future_rbr_mean_loss,
+        "future_rbr_variance_loss": future_rbr_variance_loss,
+        "future_rbr_mean_l1": future_rbr_mean_l1,
+        "future_rbr_variance_l1": future_rbr_variance_l1,
+        "total": (
+            float(loss_cfg.get("future_rbr_mean_weight", 0.0)) * future_rbr_mean_loss
+            + float(loss_cfg.get("future_rbr_variance_weight", 0.1)) * future_rbr_variance_loss
+        ),
     }
 
 
@@ -174,15 +187,18 @@ def _build_visual_item(model: SunConditionedStochasticRBRModel, dataset: SunCond
     pred_quantiles = out["prediction"][0].detach().cpu().numpy()
     return {
         "image": batch["images"][0, -1, :3].detach().cpu().numpy(),
+        "past_rbr_mean": batch["images"][0, :, 3].mean(dim=0).detach().cpu().numpy(),
         "attention": out["attention_map"][0, 0].detach().cpu().numpy(),
         "rbr_mean": out["future_rbr_mean_15min"][0, 0].detach().cpu().numpy(),
         "rbr_variance": out["future_rbr_variance_15min"][0, 0].detach().cpu().numpy(),
         "past_rbr_variation": batch["past_rbr_variation"][0, 0].detach().cpu().numpy(),
-        "future_rbr_variation": batch["future_rbr_variation"][0, 0].detach().cpu().numpy(),
+        "future_rbr_mean_target": batch["future_rbr_mean"][0, 0].detach().cpu().numpy(),
+        "future_rbr_variance_target": batch["future_rbr_variance"][0, 0].detach().cpu().numpy(),
         "future_rbr_valid": bool(batch["future_rbr_valid"][0].detach().cpu().item() > 0.0),
         "summary_values": {
             "q90-q10": float(pred_quantiles[4] - pred_quantiles[0]),
             "pv sigma": float(out["pv_sigma"][0, 0].detach().cpu().item()),
+            "sun attn sigma": float(out["sun_attention_sigma"][0, 0].detach().cpu().item()),
             "sun mean": float(out["sun_local_rbr_mean"][0, 0].detach().cpu().item()),
             "sun var": float(out["sun_local_rbr_variance"][0, 0].detach().cpu().item()),
         },
@@ -211,11 +227,15 @@ def _evaluate_split(model: SunConditionedStochasticRBRModel, dataset: SunConditi
             sun_local_rbr_mean = out["sun_local_rbr_mean"].cpu().numpy().reshape(-1)
             global_rbr_variance = out["global_rbr_variance"].cpu().numpy().reshape(-1)
             sun_local_rbr_variance = out["sun_local_rbr_variance"].cpu().numpy().reshape(-1)
-            target_variation = _resize_like(data["future_rbr_variation"], out["future_rbr_mean_15min"]).clamp(0.0, 1.0)
+            sun_attention_sigma = out["sun_attention_sigma"].cpu().numpy().reshape(-1)
+            target_mean = _resize_like(data["future_rbr_mean"], out["future_rbr_mean_15min"]).clamp(0.0, 1.0)
+            target_variance = _resize_like(data["future_rbr_variance"], out["future_rbr_variance_15min"]).clamp_min(0.0)
             pred_mean = out["future_rbr_mean_15min"].clamp(0.0, 1.0)
-            rbr_l1 = torch.abs(pred_mean - target_variation).mean(dim=(1, 2, 3)).cpu().numpy()
+            pred_variance = out["future_rbr_variance_15min"].clamp_min(0.0)
+            rbr_mean_l1 = torch.abs(pred_mean - target_mean).mean(dim=(1, 2, 3)).cpu().numpy()
+            rbr_variance_l1 = torch.abs(pred_variance - target_variance).mean(dim=(1, 2, 3)).cpu().numpy()
             pred_flat = pred_mean.flatten(1)
-            target_flat = target_variation.flatten(1)
+            target_flat = target_mean.flatten(1)
             pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
             target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
             rbr_corr = (
@@ -248,17 +268,20 @@ def _evaluate_split(model: SunConditionedStochasticRBRModel, dataset: SunConditi
                         "sun_local_rbr_mean": float(sun_local_rbr_mean[i]),
                         "global_rbr_variance": float(global_rbr_variance[i]),
                         "sun_local_rbr_variance": float(sun_local_rbr_variance[i]),
+                        "sun_attention_sigma": float(sun_attention_sigma[i]),
                         "smart_persistence_w": float(smart_persistence_w[int(meta_idx[i])]),
-                        "future_rbr_l1": float(rbr_l1[i]) if float(rbr_valid[i]) > 0 else np.nan,
-                        "future_rbr_corr": float(rbr_corr[i]) if float(rbr_valid[i]) > 0 else np.nan,
+                        "future_rbr_mean_l1": float(rbr_mean_l1[i]) if float(rbr_valid[i]) > 0 else np.nan,
+                        "future_rbr_variance_l1": float(rbr_variance_l1[i]) if float(rbr_valid[i]) > 0 else np.nan,
+                        "future_rbr_mean_corr": float(rbr_corr[i]) if float(rbr_valid[i]) > 0 else np.nan,
                         "sample_index": int(meta_idx[i]),
                     }
                 )
     pred_df = pd.DataFrame(rows).sort_values("ts_target").reset_index(drop=True)
     metrics = regression_metrics(pred_df["q50_w"].to_numpy(dtype=np.float32), pred_df["target_pv_w"].to_numpy(dtype=np.float32))
     metrics["n_samples"] = int(len(pred_df))
-    metrics["future_rbr_l1"] = float(pred_df["future_rbr_l1"].mean()) if "future_rbr_l1" in pred_df else float("nan")
-    metrics["future_rbr_corr"] = float(pred_df["future_rbr_corr"].mean()) if "future_rbr_corr" in pred_df else float("nan")
+    metrics["future_rbr_mean_l1"] = float(pred_df["future_rbr_mean_l1"].mean()) if "future_rbr_mean_l1" in pred_df else float("nan")
+    metrics["future_rbr_variance_l1"] = float(pred_df["future_rbr_variance_l1"].mean()) if "future_rbr_variance_l1" in pred_df else float("nan")
+    metrics["future_rbr_mean_corr"] = float(pred_df["future_rbr_mean_corr"].mean()) if "future_rbr_mean_corr" in pred_df else float("nan")
     metrics["interval_width_vs_sun_variance_corr"] = float(pred_df["interval_width"].corr(pred_df["sun_local_rbr_variance"])) if len(pred_df) > 1 else float("nan")
     metrics["interval_width_vs_global_variance_corr"] = float(pred_df["interval_width"].corr(pred_df["global_rbr_variance"])) if len(pred_df) > 1 else float("nan")
     return pred_df, metrics
@@ -308,7 +331,16 @@ def train_model(config: dict) -> Path:
 
     for epoch in range(1, int(config["train"]["epochs"]) + 1):
         model.train()
-        epoch_stats = {"total": [], "pv": [], "kl": [], "recon": [], "future_rbr_nll": [], "future_rbr_l1": []}
+        epoch_stats = {
+            "total": [],
+            "pv": [],
+            "kl": [],
+            "recon": [],
+            "future_rbr_mean_loss": [],
+            "future_rbr_variance_loss": [],
+            "future_rbr_mean_l1": [],
+            "future_rbr_variance_l1": [],
+        }
         train_pred_w: list[np.ndarray] = []
         train_target_w: list[np.ndarray] = []
 
@@ -350,8 +382,10 @@ def train_model(config: dict) -> Path:
             "train_pv_loss": float(np.mean(epoch_stats["pv"])),
             "train_kl_loss": float(np.mean(epoch_stats["kl"])),
             "train_recon_loss": float(np.mean(epoch_stats["recon"])),
-            "train_future_rbr_nll": float(np.mean(epoch_stats["future_rbr_nll"])),
-            "train_future_rbr_l1": float(np.mean(epoch_stats["future_rbr_l1"])),
+            "train_future_rbr_mean_loss": float(np.mean(epoch_stats["future_rbr_mean_loss"])),
+            "train_future_rbr_variance_loss": float(np.mean(epoch_stats["future_rbr_variance_loss"])),
+            "train_future_rbr_mean_l1": float(np.mean(epoch_stats["future_rbr_mean_l1"])),
+            "train_future_rbr_variance_l1": float(np.mean(epoch_stats["future_rbr_variance_l1"])),
             "train_mae_w": float(train_metrics["mae"]),
             "train_rmse_w": float(train_metrics["rmse"]),
             "val_mae_w": float(val_metrics["mae"]),
@@ -407,11 +441,13 @@ def train_model(config: dict) -> Path:
             item = _build_visual_item(model, split_ds, sample_index, device)
             save_rbr_distribution_figure(
                 image=item["image"],
+                past_rbr_mean=item["past_rbr_mean"],
                 attention=item["attention"],
                 rbr_mean=item["rbr_mean"],
                 rbr_variance=item["rbr_variance"],
                 past_rbr_variation=item["past_rbr_variation"],
-                future_rbr_variation=item["future_rbr_variation"],
+                future_rbr_mean_target=item["future_rbr_mean_target"],
+                future_rbr_variance_target=item["future_rbr_variance_target"],
                 out_path=run_dir / "figures" / f"rbr_distribution_{split_name}_{idx:02d}.png",
                 title=str(item["title"]),
                 future_rbr_valid=bool(item["future_rbr_valid"]),

@@ -33,9 +33,9 @@ scsn-model/
 - 编码：`Image Encoder + ConvLSTM`
 - 结构化潜变量：`z_dynamics`
 - 动力学：`Variational GRU`
-- 解码：未来15步 pixel-level `RBR variation mean / log-variance`
+- 解码：未来15分钟 pixel-level `averaged RBR mean map / temporal RBR variance map`
 - 预测头：输出 PV 高斯分布的 `mu / sigma`，再确定性得到 `q10 / q25 / q50 / q75 / q90`
-- 训练损失：`PV Gaussian NLL + KL + RBR reconstruction + future RBR variation Gaussian NLL`
+- 训练损失：`PV Gaussian NLL + KL + RBR reconstruction + future RBR mean Huber + future RBR variance Huber`
 - 外部 mask：不再使用外部 pseudo-mask supervision；`sky_mask_path` 只作为有效天空区域 mask
 
 ## 使用方法
@@ -98,13 +98,14 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/export_rbr_distribu
 - 旧版特征聚合拼装方式
 - 任何依赖旧最小基线设计的模型分支
 
-`rbr_distribution_*.png`会展示输入末帧、目标太阳区域权重、过去/未来 RBR variation、预测的 future RBR mean、预测的 future RBR variance、对应 overlay 和 PV 分布诊断。所有彩色 map 都带 colorbar。
+`rbr_distribution_*.png`会展示输入末帧、目标太阳区域权重、过去 RBR variation、真实/预测的 future 15min RBR mean、真实/预测的 future 15min RBR variance、对应 overlay 和 PV 分布诊断。所有彩色 map 都带 colorbar。
 
-## RBR Variation 概率监督
+## RBR Mean/Variance 概率监督
 
 `configs/base.json` 默认启用了：
 
-- `loss.rbr_distribution_weight`: `0.20`
-- `loss.rbr_distribution_sun_weight`: `2.0`
+- `loss.future_rbr_mean_weight`: `0.20`
+- `loss.future_rbr_variance_weight`: `0.10`
+- `loss.future_rbr_sun_weight`: `2.0`
 
-未来 15 分钟的 target 来自真实未来 15 张图的相邻帧 RBR variation。模型预测每个 pixel 的 mean 和 variance，并用 Gaussian NLL 训练；PV head 使用 sun-region/global 的 RBR mean 和 variance 生成 PV 分布。模型不再预测显式运动方向，也不再使用 current-sun latent attention；太阳权重只在未来目标太阳位置附近做 RBR variation 读出与 NLL 加权。
+未来 15 分钟的 target 来自真实未来 15 张图的 RBR 统计量：pixel-level averaged RBR mean map 和 temporal RBR variance map。模型预测这两张 map，并用 Huber loss 训练；PV head 使用 sun-region/global 的 RBR mean 和 variance 生成 PV 分布。模型不再预测显式运动方向，也不再使用 current-sun latent attention；太阳权重只在未来目标太阳位置附近做 RBR mean/variance 读出与 map loss 加权。太阳权重的影响半径由模型按 sample 自适应预测，并限制在 `model.sun_attention_min_sigma` 到 `model.sun_attention_max_sigma` 之间。

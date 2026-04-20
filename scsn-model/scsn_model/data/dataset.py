@@ -62,7 +62,6 @@ class SunConditionedRBRDataset(Dataset):
         self.df["ts_target"] = pd.to_datetime(self.df["ts_target"])
         self.df = self.df[self.df["split"] == split].reset_index(drop=True)
         self.image_size = tuple(int(v) for v in image_size)
-        self.rbr_variation_min_p95 = 0.015
         resolved_sky_mask_path = resolve_existing_path(sky_mask_path) if sky_mask_path else None
         if resolved_sky_mask_path and not resolved_sky_mask_path.exists():
             raise FileNotFoundError(f"Sky mask not found: {sky_mask_path} (resolved to {resolved_sky_mask_path})")
@@ -104,7 +103,7 @@ class SunConditionedRBRDataset(Dataset):
         target_rbr = input_frames[-1, 3:4]
         prev_rbr = input_frames[-2, 3:4] if input_frames.shape[0] > 1 else target_rbr.copy()
         past_rbr_variation = self._rbr_variation(frames)
-        future_rbr_variation = self._future_rbr_variation(frames[-1:], future_frames)
+        future_rbr_mean, future_rbr_variance = self._future_rbr_summary(future_frames)
 
         return {
             "images": torch.from_numpy(input_frames.astype(np.float32)),
@@ -118,7 +117,8 @@ class SunConditionedRBRDataset(Dataset):
             "target_rbr": torch.from_numpy(target_rbr.astype(np.float32)),
             "prev_rbr": torch.from_numpy(prev_rbr.astype(np.float32)),
             "past_rbr_variation": torch.from_numpy(past_rbr_variation.astype(np.float32)),
-            "future_rbr_variation": torch.from_numpy(future_rbr_variation.astype(np.float32)),
+            "future_rbr_mean": torch.from_numpy(future_rbr_mean.astype(np.float32)),
+            "future_rbr_variance": torch.from_numpy(future_rbr_variance.astype(np.float32)),
             "future_rbr_valid": torch.tensor(future_rbr_valid, dtype=torch.float32),
             "meta_index": torch.tensor(index, dtype=torch.long),
         }
@@ -148,27 +148,24 @@ class SunConditionedRBRDataset(Dataset):
             variation = np.mean(np.abs(rbr[1:] - rbr[:-1]), axis=0)
         return self._normalize_variation(variation)
 
-    def _future_rbr_variation(
-        self,
-        current_frame: np.ndarray,
-        future_frames: np.ndarray | None,
-    ) -> np.ndarray:
+    def _future_rbr_summary(self, future_frames: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         if future_frames is None or future_frames.size == 0:
-            return np.zeros((1, self.image_size[0], self.image_size[1]), dtype=np.float32)
-        all_frames = np.concatenate([current_frame, future_frames], axis=0)
-        rbr = self._build_rbr(all_frames)
-        seq = np.abs(rbr[1:] - rbr[:-1])
-        seq = np.stack([self._normalize_variation(step) for step in seq], axis=0)
-        return np.mean(seq, axis=0).astype(np.float32)
+            empty = np.zeros((1, self.image_size[0], self.image_size[1]), dtype=np.float32)
+            return empty, empty
+        rbr = self._build_rbr(future_frames)
+        mean = np.mean(rbr, axis=0).astype(np.float32)
+        variance = np.var(rbr, axis=0).astype(np.float32)
+        if self.mask is not None:
+            mean = mean * self.mask
+            variance = variance * self.mask
+        return mean, variance
 
     def _normalize_variation(self, variation: np.ndarray) -> np.ndarray:
         variation = np.asarray(variation, dtype=np.float32)
         if self.mask is not None:
             variation = variation * self.mask
         scale = float(np.percentile(variation, 95))
-        if scale < self.rbr_variation_min_p95:
-            return np.zeros_like(variation, dtype=np.float32)
-        return np.clip(variation / scale, 0.0, 1.0).astype(np.float32)
+        return np.clip(variation / max(scale, 1e-6), 0.0, 1.0).astype(np.float32)
 
     @staticmethod
     def _sun_distance_map(sun_xy: np.ndarray, height: int, width: int) -> np.ndarray:

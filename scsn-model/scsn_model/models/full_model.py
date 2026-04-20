@@ -17,11 +17,17 @@ class SunConditionedStochasticRBRModel(nn.Module):
         super().__init__()
         self.future_steps = int(model_cfg.get("future_steps", 15))
         self.feature_hw = int(model_cfg.get("feature_resolution", 32))
-        self.sun_sigma = float(model_cfg.get("sun_attention_sigma", 2.5))
         self.spatial_feature_dim = int(model_cfg.get("spatial_feature_dim", 128))
+        self.sun_sigma_min = float(model_cfg.get("sun_attention_min_sigma", 1.0))
+        self.sun_sigma_max = float(model_cfg.get("sun_attention_max_sigma", 8.0))
+        initial_sun_sigma = float(model_cfg.get("sun_attention_initial_sigma", model_cfg.get("sun_attention_sigma", 2.5)))
+        if self.sun_sigma_max <= self.sun_sigma_min:
+            raise ValueError("sun_attention_max_sigma must be larger than sun_attention_min_sigma.")
 
         encoder_channels = list(model_cfg.get("frame_channels", [32, 64, 96, 128]))
         temporal_dim = int(model_cfg.get("temporal_hidden_dim", 256))
+        pv_history_dim = int(model_cfg.get("pv_history_dim", 4))
+        solar_dim = int(model_cfg.get("solar_feature_dim", 5))
         latent_dims = {
             "dynamics": int(model_cfg.get("dynamics_latent_dim", 64)),
         }
@@ -47,9 +53,15 @@ class SunConditionedStochasticRBRModel(nn.Module):
             nn.GELU(),
             nn.Conv2d(temporal_dim // 2, 1, kernel_size=1),
         )
+        self.sun_sigma_head = nn.Sequential(
+            nn.Linear(temporal_dim + pv_history_dim + solar_dim, int(model_cfg.get("sun_attention_hidden_dim", 64))),
+            nn.GELU(),
+            nn.Linear(int(model_cfg.get("sun_attention_hidden_dim", 64)), 1),
+        )
+        self._initialize_sun_sigma_head(initial_sun_sigma)
         self.power_head = SunConditionedPowerHead(
-            pv_history_dim=int(model_cfg.get("pv_history_dim", 4)),
-            solar_dim=int(model_cfg.get("solar_feature_dim", 5)),
+            pv_history_dim=pv_history_dim,
+            solar_dim=solar_dim,
             hidden_dim=int(model_cfg.get("pv_hidden_dim", 64)),
         )
 
@@ -79,12 +91,24 @@ class SunConditionedStochasticRBRModel(nn.Module):
 
         target_sun_xy = target_sun_xy if target_sun_xy is not None else sun_xy
         rbr_mean = decoded["future_rbr_mean_maps"]
+        rbr_variance = decoded["future_rbr_variance_maps"]
         rbr_logvar = decoded["future_rbr_logvar_maps"]
-        rbr_variance = torch.exp(rbr_logvar)
         rbr_mean_15min = rbr_mean.mean(dim=1)
         rbr_variance_15min = rbr_variance.mean(dim=1)
         rbr_logvar_15min = torch.log(rbr_variance_15min.clamp_min(1e-6))
-        attention_map = self._build_sun_attention(target_sun_xy, rbr_mean_15min.shape[-2], rbr_mean_15min.shape[-1], height, width)
+        sun_attention_sigma = self._predict_sun_attention_sigma(
+            temporal_feature=temporal_out["global_feat"],
+            pv_history=pv_history,
+            solar_vec=solar_vec,
+        )
+        attention_map = self._build_sun_attention(
+            target_sun_xy,
+            rbr_mean_15min.shape[-2],
+            rbr_mean_15min.shape[-1],
+            height,
+            width,
+            sigma=sun_attention_sigma,
+        )
         attention_norm = attention_map.sum(dim=(2, 3)).clamp_min(1e-6)
         sun_local_rbr_mean = (rbr_mean_15min * attention_map).sum(dim=(2, 3)) / attention_norm
         sun_local_rbr_variance = (rbr_variance_15min * attention_map).sum(dim=(2, 3)) / attention_norm
@@ -116,9 +140,29 @@ class SunConditionedStochasticRBRModel(nn.Module):
             "global_rbr_variance": global_rbr_variance,
             "sun_local_rbr_variance": sun_local_rbr_variance,
             "attention_map": attention_map,
+            "sun_attention_sigma": sun_attention_sigma,
             "recon_rbr": recon_rbr,
             "kl_loss": latent["kl_loss"],
         }
+
+    def _initialize_sun_sigma_head(self, initial_sigma: float) -> None:
+        bounded = min(max(initial_sigma, self.sun_sigma_min + 1e-4), self.sun_sigma_max - 1e-4)
+        ratio = (bounded - self.sun_sigma_min) / (self.sun_sigma_max - self.sun_sigma_min)
+        bias = torch.logit(torch.tensor(ratio, dtype=torch.float32)).item()
+        final = self.sun_sigma_head[-1]
+        if isinstance(final, nn.Linear):
+            nn.init.zeros_(final.weight)
+            nn.init.constant_(final.bias, bias)
+
+    def _predict_sun_attention_sigma(
+        self,
+        temporal_feature: torch.Tensor,
+        pv_history: torch.Tensor,
+        solar_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        feature = torch.cat([temporal_feature, pv_history, solar_vec], dim=-1)
+        sigma_unit = torch.sigmoid(self.sun_sigma_head(feature))
+        return self.sun_sigma_min + (self.sun_sigma_max - self.sun_sigma_min) * sigma_unit
 
     def _build_sun_attention(
         self,
@@ -127,6 +171,7 @@ class SunConditionedStochasticRBRModel(nn.Module):
         feat_w: int,
         image_h: int,
         image_w: int,
+        sigma: torch.Tensor,
     ) -> torch.Tensor:
         device = sun_xy.device
         yy, xx = torch.meshgrid(
@@ -137,6 +182,7 @@ class SunConditionedStochasticRBRModel(nn.Module):
         sx = sun_xy[:, 0:1, None] * (feat_w / float(image_w))
         sy = sun_xy[:, 1:2, None] * (feat_h / float(image_h))
         dist_sq = (xx.unsqueeze(0) - sx) ** 2 + (yy.unsqueeze(0) - sy) ** 2
-        attention = torch.exp(-dist_sq / (2.0 * self.sun_sigma**2))
+        sigma = sigma.view(-1, 1, 1).clamp_min(1e-4)
+        attention = torch.exp(-dist_sq / (2.0 * sigma.pow(2)))
         attention = attention / attention.flatten(1).sum(dim=-1, keepdim=True).view(-1, 1, 1).clamp_min(1e-6)
         return attention.unsqueeze(1)
