@@ -18,7 +18,7 @@ from scsn_model.utils.io import load_json, normalize_config_paths
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Sun-Conditioned Stochastic Cloud State Network")
+    parser = argparse.ArgumentParser(description="Train Sun-Conditioned Stochastic RBR Distribution Network")
     parser.add_argument("--config", required=True, help="Path to config JSON")
     args = parser.parse_args()
 

@@ -11,7 +11,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from ..utils.io import resolve_project_path
-from .cloud_mask_supervision import CloudMaskSupervisor
 
 
 def load_mask(mask_path: str | Path, size: tuple[int, int]) -> np.ndarray:
@@ -49,7 +48,7 @@ def _parse_jsonish(value: object) -> list[float] | list[str]:
         return ast.literal_eval(value)
 
 
-class SunConditionedCloudDataset(Dataset):
+class SunConditionedRBRDataset(Dataset):
     def __init__(
         self,
         csv_path: str | Path,
@@ -57,15 +56,13 @@ class SunConditionedCloudDataset(Dataset):
         image_size: tuple[int, int],
         sky_mask_path: str | Path | None = None,
         peak_power_w: float | None = None,
-        cloud_mask_manifest_path: str | Path | None = None,
-        cloud_mask_sky_mask_path: str | Path | None = None,
     ) -> None:
         self.df = pd.read_csv(resolve_existing_path(csv_path))
         self.df["ts_anchor"] = pd.to_datetime(self.df["ts_anchor"])
         self.df["ts_target"] = pd.to_datetime(self.df["ts_target"])
         self.df = self.df[self.df["split"] == split].reset_index(drop=True)
         self.image_size = tuple(int(v) for v in image_size)
-        self.rbr_hotspot_min_p95 = 0.015
+        self.rbr_variation_min_p95 = 0.015
         resolved_sky_mask_path = resolve_existing_path(sky_mask_path) if sky_mask_path else None
         if resolved_sky_mask_path and not resolved_sky_mask_path.exists():
             raise FileNotFoundError(f"Sky mask not found: {sky_mask_path} (resolved to {resolved_sky_mask_path})")
@@ -73,19 +70,6 @@ class SunConditionedCloudDataset(Dataset):
         self.peak_power_w = float(peak_power_w) if peak_power_w is not None else 1.0
         if self.peak_power_w <= 0:
             raise ValueError("peak_power_w must be positive.")
-        self.cloud_mask_supervisor = None
-        if cloud_mask_manifest_path and cloud_mask_sky_mask_path:
-            manifest_path = resolve_existing_path(cloud_mask_manifest_path)
-            mask_path = resolve_existing_path(cloud_mask_sky_mask_path)
-            if not manifest_path.exists():
-                raise FileNotFoundError(f"Cloud mask manifest not found: {cloud_mask_manifest_path} (resolved to {manifest_path})")
-            if not mask_path.exists():
-                raise FileNotFoundError(f"Cloud mask sky mask not found: {cloud_mask_sky_mask_path} (resolved to {mask_path})")
-            self.cloud_mask_supervisor = CloudMaskSupervisor(
-                manifest_path=manifest_path,
-                sky_mask_path=mask_path,
-                image_size=self.image_size,
-            )
 
     def __len__(self) -> int:
         return len(self.df)
@@ -110,19 +94,17 @@ class SunConditionedCloudDataset(Dataset):
         if self.mask is not None:
             frames = frames * self.mask
         future_frames = None
-        future_hotspot_valid = 0.0
+        future_rbr_valid = 0.0
         if future_img_paths:
             future_frames = np.stack([load_rgb_image(p, self.image_size) for p in future_img_paths], axis=0)
             if self.mask is not None:
                 future_frames = future_frames * self.mask
-            future_hotspot_valid = 1.0
-        cloud_mask, cloud_mask_valid = self._load_cloud_mask(img_paths[-1])
-
+            future_rbr_valid = 1.0
         input_frames = self._build_input_channels(frames=frames, sun_xy=current_sun_xy)
         target_rbr = input_frames[-1, 3:4]
         prev_rbr = input_frames[-2, 3:4] if input_frames.shape[0] > 1 else target_rbr.copy()
-        past_rbr_change_hotspot = self._rbr_change_hotspot(frames)
-        future_rbr_change_hotspot = self._future_rbr_change_hotspot(frames[-1:], future_frames)
+        past_rbr_variation = self._rbr_variation(frames)
+        future_rbr_variation = self._future_rbr_variation(frames[-1:], future_frames)
 
         return {
             "images": torch.from_numpy(input_frames.astype(np.float32)),
@@ -135,27 +117,14 @@ class SunConditionedCloudDataset(Dataset):
             "target_sun_xy": torch.tensor(target_sun_xy, dtype=torch.float32),
             "target_rbr": torch.from_numpy(target_rbr.astype(np.float32)),
             "prev_rbr": torch.from_numpy(prev_rbr.astype(np.float32)),
-            "past_rbr_change_hotspot": torch.from_numpy(past_rbr_change_hotspot.astype(np.float32)),
-            "future_rbr_change_hotspot": torch.from_numpy(future_rbr_change_hotspot.astype(np.float32)),
-            "future_hotspot_valid": torch.tensor(future_hotspot_valid, dtype=torch.float32),
-            "cloud_mask": torch.from_numpy(cloud_mask.astype(np.float32)),
-            "cloud_mask_valid": torch.tensor(cloud_mask_valid, dtype=torch.float32),
+            "past_rbr_variation": torch.from_numpy(past_rbr_variation.astype(np.float32)),
+            "future_rbr_variation": torch.from_numpy(future_rbr_variation.astype(np.float32)),
+            "future_rbr_valid": torch.tensor(future_rbr_valid, dtype=torch.float32),
             "meta_index": torch.tensor(index, dtype=torch.long),
         }
 
     def dataframe(self) -> pd.DataFrame:
         return self.df.copy()
-
-    def cloud_mask_coverage(self) -> tuple[int, int]:
-        if self.cloud_mask_supervisor is None:
-            return 0, len(self.df)
-        keys = set(self.cloud_mask_supervisor.available_keys())
-        valid = 0
-        for row in self.df.itertuples(index=False):
-            img_paths = _parse_jsonish(row.img_paths)
-            if Path(str(img_paths[-1])).name in keys:
-                valid += 1
-        return valid, len(self.df)
 
     def _build_input_channels(self, frames: np.ndarray, sun_xy: np.ndarray) -> np.ndarray:
         seq_len, _, height, width = frames.shape
@@ -171,15 +140,15 @@ class SunConditionedCloudDataset(Dataset):
         rbr = frames[:, 0:1] / np.clip(frames[:, 2:3], a_min=1e-3, a_max=None)
         return np.clip(rbr, 0.0, 4.0) / 4.0
 
-    def _rbr_change_hotspot(self, frames: np.ndarray) -> np.ndarray:
+    def _rbr_variation(self, frames: np.ndarray) -> np.ndarray:
         rbr = self._build_rbr(frames)
         if rbr.shape[0] <= 1:
-            hotspot = np.zeros_like(rbr[0])
+            variation = np.zeros_like(rbr[0])
         else:
-            hotspot = np.mean(np.abs(rbr[1:] - rbr[:-1]), axis=0)
-        return self._normalize_hotspot(hotspot)
+            variation = np.mean(np.abs(rbr[1:] - rbr[:-1]), axis=0)
+        return self._normalize_variation(variation)
 
-    def _future_rbr_change_hotspot(
+    def _future_rbr_variation(
         self,
         current_frame: np.ndarray,
         future_frames: np.ndarray | None,
@@ -189,17 +158,17 @@ class SunConditionedCloudDataset(Dataset):
         all_frames = np.concatenate([current_frame, future_frames], axis=0)
         rbr = self._build_rbr(all_frames)
         seq = np.abs(rbr[1:] - rbr[:-1])
-        seq = np.stack([self._normalize_hotspot(step) for step in seq], axis=0)
+        seq = np.stack([self._normalize_variation(step) for step in seq], axis=0)
         return np.mean(seq, axis=0).astype(np.float32)
 
-    def _normalize_hotspot(self, hotspot: np.ndarray) -> np.ndarray:
-        hotspot = np.asarray(hotspot, dtype=np.float32)
+    def _normalize_variation(self, variation: np.ndarray) -> np.ndarray:
+        variation = np.asarray(variation, dtype=np.float32)
         if self.mask is not None:
-            hotspot = hotspot * self.mask
-        scale = float(np.percentile(hotspot, 95))
-        if scale < self.rbr_hotspot_min_p95:
-            return np.zeros_like(hotspot, dtype=np.float32)
-        return np.clip(hotspot / scale, 0.0, 1.0).astype(np.float32)
+            variation = variation * self.mask
+        scale = float(np.percentile(variation, 95))
+        if scale < self.rbr_variation_min_p95:
+            return np.zeros_like(variation, dtype=np.float32)
+        return np.clip(variation / scale, 0.0, 1.0).astype(np.float32)
 
     @staticmethod
     def _sun_distance_map(sun_xy: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -211,14 +180,3 @@ class SunConditionedCloudDataset(Dataset):
         dist = np.sqrt((xx - float(sun_xy[0])) ** 2 + (yy - float(sun_xy[1])) ** 2)
         dist = dist / max(np.sqrt(height**2 + width**2), 1.0)
         return dist[None, ...].astype(np.float32)
-
-    def _load_cloud_mask(self, current_image_path: str | Path) -> tuple[np.ndarray, float]:
-        empty = np.zeros((1, self.image_size[0], self.image_size[1]), dtype=np.float32)
-        if self.cloud_mask_supervisor is None:
-            return empty, 0.0
-        mask = self.cloud_mask_supervisor.lookup(resolve_existing_path(current_image_path))
-        if mask is None:
-            return empty, 0.0
-        if self.mask is not None:
-            mask = mask * self.mask
-        return mask.astype(np.float32), 1.0

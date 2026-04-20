@@ -51,10 +51,7 @@
     "dynamics_hidden_dim": 128,
     "pv_history_dim": 4,
     "pv_hidden_dim": 64,
-    "head_hidden_dim": 128,
-    "sun_attention_sigma": 2.5,
-    "disable_sun_attention": false,
-    "use_global_cloud_in_head": false
+    "sun_attention_sigma": 2.5
   },
   "loss": {
     "pv_weight": 1.0,

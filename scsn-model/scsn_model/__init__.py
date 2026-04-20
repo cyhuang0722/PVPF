@@ -1,1 +1,1 @@
-"""Sun-Conditioned Stochastic Cloud State Network package."""
+"""Sun-Conditioned Stochastic RBR Distribution Network package."""

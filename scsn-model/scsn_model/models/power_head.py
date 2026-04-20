@@ -6,16 +6,15 @@ import torch.nn.functional as F
 
 
 class SunConditionedPowerHead(nn.Module):
-    def __init__(self, cloud_dim: int, pv_history_dim: int, solar_dim: int, hidden_dim: int, use_global_cloud: bool = False) -> None:
+    def __init__(self, pv_history_dim: int, solar_dim: int, hidden_dim: int) -> None:
         super().__init__()
-        self.use_global_cloud = use_global_cloud
         self.pv_encoder = nn.Sequential(
             nn.Linear(pv_history_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
-        feature_dim = hidden_dim + solar_dim + 4 + (cloud_dim if use_global_cloud else 0)
+        feature_dim = hidden_dim + solar_dim + 4
         self.backbone = nn.Sequential(
             nn.Linear(feature_dim, 128),
             nn.GELU(),
@@ -28,7 +27,6 @@ class SunConditionedPowerHead(nn.Module):
 
     def forward(
         self,
-        pooled_cloud: torch.Tensor,
         pv_history: torch.Tensor,
         solar_vec: torch.Tensor,
         global_rbr_mean: torch.Tensor,
@@ -44,8 +42,6 @@ class SunConditionedPowerHead(nn.Module):
             sun_local_rbr_variance,
         ]
         feature_parts = [pv_feature, solar_vec, *distribution_features]
-        if self.use_global_cloud:
-            feature_parts.insert(0, pooled_cloud)
         features = torch.cat(feature_parts, dim=-1)
         hidden = self.backbone(features)
         pv_mu = self.mu_head(hidden)

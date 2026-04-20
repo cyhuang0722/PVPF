@@ -9,12 +9,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from ..data.dataset import SunConditionedCloudDataset, _parse_jsonish, resolve_existing_path
+from ..data.dataset import SunConditionedRBRDataset, _parse_jsonish, resolve_existing_path
 from ..data.solar_geometry import Calibration, compute_clear_sky_power
-from ..models.full_model import SunConditionedStochasticCloudModel
+from ..models.full_model import SunConditionedStochasticRBRModel
 from ..utils.io import ensure_dir, normalize_config_paths, save_json, set_seed, timestamped_run_dir
 from ..viz.forecast import save_forecast_band_plot
-from ..viz.motion import save_scsn_state_figure
+from ..viz.rbr import save_rbr_distribution_figure
 from .metrics import regression_metrics
 
 try:
@@ -60,7 +60,7 @@ def _setup_logger(run_dir: Path) -> logging.Logger:
     return logger
 
 
-def _make_loader(dataset: SunConditionedCloudDataset, batch_size: int, num_workers: int, shuffle: bool) -> DataLoader:
+def _make_loader(dataset: SunConditionedRBRDataset, batch_size: int, num_workers: int, shuffle: bool) -> DataLoader:
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -81,7 +81,7 @@ def _target_to_w(values: np.ndarray, clear_sky_w: np.ndarray, use_clear_sky_inde
     return np.clip(clipped, a_min=0.0, a_max=None)
 
 
-def _persistence_metrics(dataset: SunConditionedCloudDataset) -> dict[str, float]:
+def _persistence_metrics(dataset: SunConditionedRBRDataset) -> dict[str, float]:
     df = dataset.dataframe()
     pred = []
     target = []
@@ -94,7 +94,7 @@ def _persistence_metrics(dataset: SunConditionedCloudDataset) -> dict[str, float
     return metrics
 
 
-def _smart_persistence_predictions(dataset: SunConditionedCloudDataset, config: dict) -> np.ndarray:
+def _smart_persistence_predictions(dataset: SunConditionedRBRDataset, config: dict) -> np.ndarray:
     df = dataset.dataframe()
     data_cfg = config["data"]
     calib = Calibration.from_json(resolve_existing_path(data_cfg["calibration_json"]))
@@ -114,7 +114,7 @@ def _smart_persistence_predictions(dataset: SunConditionedCloudDataset, config: 
     return np.clip(pred.astype(np.float32), a_min=0.0, a_max=None)
 
 
-def _smart_persistence_metrics(dataset: SunConditionedCloudDataset, config: dict) -> dict[str, float]:
+def _smart_persistence_metrics(dataset: SunConditionedRBRDataset, config: dict) -> dict[str, float]:
     pred = _smart_persistence_predictions(dataset, config)
     target = dataset.dataframe()["target_pv_w"].to_numpy(dtype=np.float32)
     metrics = regression_metrics(pred, target)
@@ -144,13 +144,13 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
     pred_logvar = output["future_rbr_logvar_15min"]
     future_rbr_nll = pred_mean.new_zeros(())
     future_rbr_l1 = pred_mean.new_zeros(())
-    if "future_rbr_change_hotspot" in data and "future_hotspot_valid" in data:
-        valid = data["future_hotspot_valid"].view(-1, 1, 1, 1)
+    if "future_rbr_variation" in data and "future_rbr_valid" in data:
+        valid = data["future_rbr_valid"].view(-1, 1, 1, 1)
         if torch.any(valid > 0):
-            target_rbr = _resize_like(data["future_rbr_change_hotspot"], pred_mean).clamp(0.0, 1.0)
+            target_rbr = _resize_like(data["future_rbr_variation"], pred_mean).clamp(0.0, 1.0)
             attention = output["attention_map"].detach()
             attention_scale = attention.flatten(1).amax(dim=1).view(-1, 1, 1, 1).clamp_min(1e-6)
-            attention_weight = 1.0 + float(loss_cfg.get("rbr_distribution_sun_weight", loss_cfg.get("future_hotspot_sun_weight", 2.0))) * (attention / attention_scale)
+            attention_weight = 1.0 + float(loss_cfg.get("rbr_distribution_sun_weight", 2.0)) * (attention / attention_scale)
             pixel_nll = 0.5 * (torch.exp(-pred_logvar) * (target_rbr - pred_mean).pow(2) + pred_logvar)
             per_sample_nll = (pixel_nll * attention_weight).mean(dim=(1, 2, 3))
             per_sample_l1 = torch.abs(pred_mean - target_rbr).mean(dim=(1, 2, 3))
@@ -164,7 +164,7 @@ def _compute_auxiliary_losses(output: dict[str, torch.Tensor], data: dict[str, t
     }
 
 
-def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunConditionedCloudDataset, sample_index: int, device: torch.device) -> dict:
+def _build_visual_item(model: SunConditionedStochasticRBRModel, dataset: SunConditionedRBRDataset, sample_index: int, device: torch.device) -> dict:
     model.eval()
     raw = dataset[sample_index]
     batch = {k: v.unsqueeze(0).to(device) if torch.is_tensor(v) else v for k, v in raw.items()}
@@ -177,9 +177,9 @@ def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunCo
         "attention": out["attention_map"][0, 0].detach().cpu().numpy(),
         "rbr_mean": out["future_rbr_mean_15min"][0, 0].detach().cpu().numpy(),
         "rbr_variance": out["future_rbr_variance_15min"][0, 0].detach().cpu().numpy(),
-        "past_rbr_change_hotspot": batch["past_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
-        "future_rbr_change_hotspot": batch["future_rbr_change_hotspot"][0, 0].detach().cpu().numpy(),
-        "future_hotspot_valid": bool(batch["future_hotspot_valid"][0].detach().cpu().item() > 0.0),
+        "past_rbr_variation": batch["past_rbr_variation"][0, 0].detach().cpu().numpy(),
+        "future_rbr_variation": batch["future_rbr_variation"][0, 0].detach().cpu().numpy(),
+        "future_rbr_valid": bool(batch["future_rbr_valid"][0].detach().cpu().item() > 0.0),
         "summary_values": {
             "q90-q10": float(pred_quantiles[4] - pred_quantiles[0]),
             "pv sigma": float(out["pv_sigma"][0, 0].detach().cpu().item()),
@@ -190,7 +190,7 @@ def _build_visual_item(model: SunConditionedStochasticCloudModel, dataset: SunCo
     }
 
 
-def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunConditionedCloudDataset, config: dict, device: torch.device) -> tuple[pd.DataFrame, dict[str, float]]:
+def _evaluate_split(model: SunConditionedStochasticRBRModel, dataset: SunConditionedRBRDataset, config: dict, device: torch.device) -> tuple[pd.DataFrame, dict[str, float]]:
     loader = _make_loader(dataset, batch_size=int(config["train"]["batch_size"]), num_workers=int(config["train"]["num_workers"]), shuffle=False)
     model.eval()
     use_csi = bool(config["data"].get("use_clear_sky_index", True))
@@ -211,18 +211,18 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
             sun_local_rbr_mean = out["sun_local_rbr_mean"].cpu().numpy().reshape(-1)
             global_rbr_variance = out["global_rbr_variance"].cpu().numpy().reshape(-1)
             sun_local_rbr_variance = out["sun_local_rbr_variance"].cpu().numpy().reshape(-1)
-            target_hotspot = _resize_like(data["future_rbr_change_hotspot"], out["future_rbr_mean_15min"]).clamp(0.0, 1.0)
+            target_variation = _resize_like(data["future_rbr_variation"], out["future_rbr_mean_15min"]).clamp(0.0, 1.0)
             pred_mean = out["future_rbr_mean_15min"].clamp(0.0, 1.0)
-            rbr_l1 = torch.abs(pred_mean - target_hotspot).mean(dim=(1, 2, 3)).cpu().numpy()
+            rbr_l1 = torch.abs(pred_mean - target_variation).mean(dim=(1, 2, 3)).cpu().numpy()
             pred_flat = pred_mean.flatten(1)
-            target_flat = target_hotspot.flatten(1)
+            target_flat = target_variation.flatten(1)
             pred_centered = pred_flat - pred_flat.mean(dim=1, keepdim=True)
             target_centered = target_flat - target_flat.mean(dim=1, keepdim=True)
-            hotspot_corr = (
+            rbr_corr = (
                 (pred_centered * target_centered).mean(dim=1)
                 / (pred_centered.std(dim=1).clamp_min(1e-6) * target_centered.std(dim=1).clamp_min(1e-6))
             ).cpu().numpy()
-            hotspot_valid = data["future_hotspot_valid"].cpu().numpy()
+            rbr_valid = data["future_rbr_valid"].cpu().numpy()
             for i in range(len(meta_idx)):
                 frame = dataset.df.iloc[int(meta_idx[i])]
                 rows.append(
@@ -249,8 +249,8 @@ def _evaluate_split(model: SunConditionedStochasticCloudModel, dataset: SunCondi
                         "global_rbr_variance": float(global_rbr_variance[i]),
                         "sun_local_rbr_variance": float(sun_local_rbr_variance[i]),
                         "smart_persistence_w": float(smart_persistence_w[int(meta_idx[i])]),
-                        "future_rbr_l1": float(rbr_l1[i]) if float(hotspot_valid[i]) > 0 else np.nan,
-                        "future_rbr_corr": float(hotspot_corr[i]) if float(hotspot_valid[i]) > 0 else np.nan,
+                        "future_rbr_l1": float(rbr_l1[i]) if float(rbr_valid[i]) > 0 else np.nan,
+                        "future_rbr_corr": float(rbr_corr[i]) if float(rbr_valid[i]) > 0 else np.nan,
                         "sample_index": int(meta_idx[i]),
                     }
                 )
@@ -277,7 +277,7 @@ def train_model(config: dict) -> Path:
     logger.info("Using device: %s", device)
 
     datasets = {
-        split: SunConditionedCloudDataset(
+        split: SunConditionedRBRDataset(
             csv_path=config["data"]["samples_csv"],
             split=split,
             image_size=tuple(config["data"]["image_size"]),
@@ -295,7 +295,7 @@ def train_model(config: dict) -> Path:
         logger.info("Smart persistence baseline %s mae=%.2f rmse=%.2f", split_name, metrics["mae"], metrics["rmse"])
 
     train_loader = _make_loader(datasets["train"], batch_size=int(config["train"]["batch_size"]), num_workers=int(config["train"]["num_workers"]), shuffle=True)
-    model = SunConditionedStochasticCloudModel(config["model"]).to(device)
+    model = SunConditionedStochasticRBRModel(config["model"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["train"]["learning_rate"]), weight_decay=float(config["train"]["weight_decay"]))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(config["train"]["epochs"]), 1))
 
@@ -405,16 +405,16 @@ def train_model(config: dict) -> Path:
             save_forecast_band_plot(pred_df.head(200), run_dir / "figures" / f"forecast_band_{split_name}.png", f"{split_name} forecast band")
         for idx, sample_index in enumerate(_select_visual_indices(pred_df, int(config["train"].get("save_top_k_visualizations", 6)))):
             item = _build_visual_item(model, split_ds, sample_index, device)
-            save_scsn_state_figure(
+            save_rbr_distribution_figure(
                 image=item["image"],
                 attention=item["attention"],
                 rbr_mean=item["rbr_mean"],
                 rbr_variance=item["rbr_variance"],
-                past_rbr_change_hotspot=item["past_rbr_change_hotspot"],
-                future_rbr_change_hotspot=item["future_rbr_change_hotspot"],
-                out_path=run_dir / "figures" / f"cloud_state_{split_name}_{idx:02d}.png",
+                past_rbr_variation=item["past_rbr_variation"],
+                future_rbr_variation=item["future_rbr_variation"],
+                out_path=run_dir / "figures" / f"rbr_distribution_{split_name}_{idx:02d}.png",
                 title=str(item["title"]),
-                future_hotspot_valid=bool(item["future_hotspot_valid"]),
+                future_rbr_valid=bool(item["future_rbr_valid"]),
                 summary_values=item["summary_values"],
             )
     return run_dir

@@ -33,7 +33,7 @@ class ConvLSTMCell(nn.Module):
         return h, c
 
 
-class TemporalCloudStateEncoder(nn.Module):
+class TemporalRBRStateEncoder(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.cell = ConvLSTMCell(input_dim=input_dim, hidden_dim=hidden_dim)

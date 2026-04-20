@@ -1,4 +1,4 @@
-# Sun-Conditioned Stochastic Cloud State Network
+# Sun-Conditioned Stochastic RBR Distribution Network
 
 这个目录实现了你在`/Users/huangchouyue/Desktop/seminar材料/scsn_model_design.md`里定义的 SCSN，并且目录结构直接对应设计文档里的模块。
 
@@ -13,7 +13,7 @@ scsn-model/
       temporal_encoder.py
       latent_state.py
       stochastic_dynamics.py
-      cloud_decoder.py
+      rbr_decoder.py
       power_head.py
       full_model.py
     train/
@@ -23,6 +23,7 @@ scsn-model/
     prepare_dataset.py
     train.py
     infer.py
+    export_rbr_distribution_video.py
 ```
 
 ## 当前实现
@@ -35,7 +36,7 @@ scsn-model/
 - 解码：未来15步 pixel-level `RBR variation mean / log-variance`
 - 预测头：输出 PV 高斯分布的 `mu / sigma`，再确定性得到 `q10 / q25 / q50 / q75 / q90`
 - 训练损失：`PV Gaussian NLL + KL + RBR reconstruction + future RBR variation Gaussian NLL`
-- 弱监督：不再使用 cloud-mask/pseudo-mask supervision；`sky_mask_path` 只作为有效天空区域 mask
+- 外部 mask：不再使用外部 pseudo-mask supervision；`sky_mask_path` 只作为有效天空区域 mask
 
 ## 使用方法
 
@@ -62,6 +63,15 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
   --split test
 ```
 
+4. 导出某一天的 RBR distribution 视频
+
+```bash
+python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/export_rbr_distribution_video.py \
+  --run-dir /Users/huangchouyue/Projects/PVPF/scsn-model/artifacts/runs/<run_name> \
+  --date YYYY-MM-DD \
+  --split test
+```
+
 ## 产物
 
 训练输出目录位于：
@@ -77,7 +87,7 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
 - `best_model.pt`
 - `train.log`
 - `figures/forecast_band_*.png`
-- `figures/cloud_state_*.png`
+- `figures/rbr_distribution_*.png`
 
 ## 已移除的旧设计残留
 
@@ -88,11 +98,11 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/infer.py \
 - 旧版特征聚合拼装方式
 - 任何依赖旧最小基线设计的模型分支
 
-`cloud_state_*.png`会展示输入末帧、目标太阳区域权重、过去/未来 RBR variation、预测的 future RBR mean、预测的 future RBR variance、对应 overlay 和 PV 分布诊断。所有彩色 map 都带 colorbar。不可验证的 `transmission / opacity / gap / future cloud probability / cloud risk / sun occlusion` 空间图已经移除。
+`rbr_distribution_*.png`会展示输入末帧、目标太阳区域权重、过去/未来 RBR variation、预测的 future RBR mean、预测的 future RBR variance、对应 overlay 和 PV 分布诊断。所有彩色 map 都带 colorbar。
 
 ## RBR Variation 概率监督
 
-`configs/base.json` 和 `configs/experiment_no_sun_attention.json` 默认启用了：
+`configs/base.json` 默认启用了：
 
 - `loss.rbr_distribution_weight`: `0.20`
 - `loss.rbr_distribution_sun_weight`: `2.0`

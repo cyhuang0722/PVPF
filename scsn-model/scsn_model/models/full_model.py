@@ -4,22 +4,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .cloud_decoder import FutureCloudStateDecoder
 from .image_encoder import ImageEncoder
 from .latent_state import StructuredLatentState
 from .power_head import SunConditionedPowerHead
+from .rbr_decoder import FutureRBRDistributionDecoder
 from .stochastic_dynamics import VariationalGRUDynamics
-from .temporal_encoder import TemporalCloudStateEncoder
+from .temporal_encoder import TemporalRBRStateEncoder
 
 
-class SunConditionedStochasticCloudModel(nn.Module):
+class SunConditionedStochasticRBRModel(nn.Module):
     def __init__(self, model_cfg: dict) -> None:
         super().__init__()
         self.future_steps = int(model_cfg.get("future_steps", 15))
         self.feature_hw = int(model_cfg.get("feature_resolution", 32))
         self.sun_sigma = float(model_cfg.get("sun_attention_sigma", 2.5))
         self.spatial_feature_dim = int(model_cfg.get("spatial_feature_dim", 128))
-        self.disable_sun_attention = bool(model_cfg.get("disable_sun_attention", False))
 
         encoder_channels = list(model_cfg.get("frame_channels", [32, 64, 96, 128]))
         temporal_dim = int(model_cfg.get("temporal_hidden_dim", 256))
@@ -30,14 +29,14 @@ class SunConditionedStochasticCloudModel(nn.Module):
         dynamics_hidden = int(model_cfg.get("dynamics_hidden_dim", 128))
 
         self.image_encoder = ImageEncoder(in_channels=int(model_cfg.get("input_channels", 6)), channels=encoder_channels)
-        self.temporal_encoder = TemporalCloudStateEncoder(input_dim=encoder_channels[-1], hidden_dim=temporal_dim)
+        self.temporal_encoder = TemporalRBRStateEncoder(input_dim=encoder_channels[-1], hidden_dim=temporal_dim)
         self.latent_state = StructuredLatentState(
             in_dim=temporal_dim,
             latent_dims=latent_dims,
             spatial_dim=self.spatial_feature_dim,
         )
         self.dynamics = VariationalGRUDynamics(latent_dim=latent_total_dim, hidden_dim=dynamics_hidden, future_steps=self.future_steps)
-        self.cloud_decoder = FutureCloudStateDecoder(
+        self.rbr_decoder = FutureRBRDistributionDecoder(
             spatial_dim=self.spatial_feature_dim,
             latent_dim=latent_total_dim,
             hidden_dim=dynamics_hidden,
@@ -49,11 +48,9 @@ class SunConditionedStochasticCloudModel(nn.Module):
             nn.Conv2d(temporal_dim // 2, 1, kernel_size=1),
         )
         self.power_head = SunConditionedPowerHead(
-            cloud_dim=temporal_dim,
             pv_history_dim=int(model_cfg.get("pv_history_dim", 4)),
             solar_dim=int(model_cfg.get("solar_feature_dim", 5)),
             hidden_dim=int(model_cfg.get("pv_hidden_dim", 64)),
-            use_global_cloud=bool(model_cfg.get("use_global_cloud_in_head", False)),
         )
 
     def forward(
@@ -69,12 +66,12 @@ class SunConditionedStochasticCloudModel(nn.Module):
         encoded = encoded.view(batch, seq_len, encoded.shape[1], encoded.shape[2], encoded.shape[3])
 
         temporal_out = self.temporal_encoder(encoded)
-        cloud_feature = temporal_out["spatial_feat"]
-        latent = self.latent_state(cloud_feature)
+        temporal_feature = temporal_out["spatial_feat"]
+        latent = self.latent_state(temporal_feature)
         z0 = latent["samples"]["dynamics"]
 
         dynamics = self.dynamics(z0)
-        decoded = self.cloud_decoder(
+        decoded = self.rbr_decoder(
             dynamics["future_z"],
             dynamics["hidden_seq"],
             spatial_feat=latent["spatial_feat"],
@@ -95,7 +92,6 @@ class SunConditionedStochasticCloudModel(nn.Module):
         global_rbr_variance = rbr_variance_15min.mean(dim=(2, 3))
 
         power = self.power_head(
-            pooled_cloud=temporal_out["global_feat"],
             pv_history=pv_history,
             solar_vec=solar_vec,
             global_rbr_mean=global_rbr_mean,
@@ -103,7 +99,7 @@ class SunConditionedStochasticCloudModel(nn.Module):
             global_rbr_variance=global_rbr_variance,
             sun_local_rbr_variance=sun_local_rbr_variance,
         )
-        recon_rbr = torch.sigmoid(self.reconstruction_head(cloud_feature))
+        recon_rbr = torch.sigmoid(self.reconstruction_head(temporal_feature))
         return {
             "prediction": power["prediction"],
             "pv_mu": power["pv_mu"],
@@ -132,12 +128,6 @@ class SunConditionedStochasticCloudModel(nn.Module):
         image_h: int,
         image_w: int,
     ) -> torch.Tensor:
-        if self.disable_sun_attention:
-            return torch.ones(
-                (sun_xy.shape[0], 1, feat_h, feat_w),
-                device=sun_xy.device,
-                dtype=torch.float32,
-            )
         device = sun_xy.device
         yy, xx = torch.meshgrid(
             torch.arange(feat_h, device=device, dtype=torch.float32),
