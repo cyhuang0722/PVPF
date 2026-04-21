@@ -1,0 +1,2 @@
+epoch,train_loss,val_mae,val_rmse,val_bias,val_n_samples,val_baseline_mae,val_baseline_rmse,val_coverage_80,val_pinball_q10_w,val_pinball_q90_w,val_mean_interval_width_w
+1,-0.40764719247817993,4860.667846060964,5584.051378402885,-217.48279076015265,15,5078.865950520833,5807.646908899374,1.0,1624.990228052443,1581.4936699004122,32064.83897952856
