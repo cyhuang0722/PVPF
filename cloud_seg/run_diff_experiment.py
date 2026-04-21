@@ -93,9 +93,21 @@ def load_target_days(target_days_csv: Path) -> list[pd.Timestamp]:
     clear_flag = day_df["is_clear_sky"]
     if clear_flag.dtype != bool:
         clear_flag = clear_flag.astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
-    target_days = pd.to_datetime(day_df.loc[~clear_flag, "date"]).dt.normalize().drop_duplicates().sort_values().tolist()
+    target_mask = ~clear_flag
+    if "usable_for_cloud_mask_ref" in day_df.columns:
+        usable_flag = day_df["usable_for_cloud_mask_ref"]
+        if usable_flag.dtype != bool:
+            usable_flag = usable_flag.astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
+        target_mask &= usable_flag
+    elif "is_overcast" in day_df.columns:
+        overcast_flag = day_df["is_overcast"]
+        if overcast_flag.dtype != bool:
+            overcast_flag = overcast_flag.astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
+        target_mask &= ~overcast_flag
+
+    target_days = pd.to_datetime(day_df.loc[target_mask, "date"]).dt.normalize().drop_duplicates().sort_values().tolist()
     if not target_days:
-        raise RuntimeError(f"No rows with is_clear_sky=false found in {target_days_csv}")
+        raise RuntimeError(f"No usable non-clear rows found in {target_days_csv}")
     return target_days
 
 

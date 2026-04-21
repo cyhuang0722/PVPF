@@ -31,6 +31,10 @@ class Config:
     min_blue_fraction: float = 0.35
     max_gray_fraction: float = 0.60
     max_bright_white_fraction: float = 0.35
+    overcast_max_mean_target_csi: float = 0.20
+    overcast_max_max_target_csi: float = 0.35
+    overcast_max_pv_peak_ratio: float = 0.35
+    overcast_max_csi_p90: float = 0.30
     image_stride_min: int = 30
 
 
@@ -137,6 +141,8 @@ def _daily_pv_metrics(pred_df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         y_pred = day_df["spm_pred_w"].to_numpy(dtype=np.float64)
         csi_true = day_df["target_csi"].to_numpy(dtype=np.float64)
         csi_pred = day_df["spm_pred_csi"].to_numpy(dtype=np.float64)
+        peak_clear_sky_w = float(np.max(day_df["target_clear_sky_w"].to_numpy(dtype=np.float64)))
+        peak_pv_w = float(np.max(y_true))
         rows.append(
             {
                 "date": date,
@@ -146,8 +152,12 @@ def _daily_pv_metrics(pred_df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
                 "pv_rmse_w": float(math.sqrt(np.mean((y_true - y_pred) ** 2))),
                 "csi_mae": float(np.mean(np.abs(csi_true - csi_pred))),
                 "mean_target_csi": float(np.mean(csi_true)),
+                "p90_target_csi": float(np.quantile(csi_true, 0.90)),
                 "min_target_csi": float(np.min(csi_true)),
                 "max_target_csi": float(np.max(csi_true)),
+                "peak_pv_w": peak_pv_w,
+                "peak_clear_sky_w": peak_clear_sky_w,
+                "peak_pv_ratio": float(peak_pv_w / max(peak_clear_sky_w, 1e-6)),
             }
         )
     return pd.DataFrame.from_records(rows)
@@ -233,12 +243,22 @@ def generate_clear_sky_table(cfg: Config) -> pd.DataFrame:
         merged["csi_mae"] <= cfg.mae_clear_sky_index_threshold
     )
     merged["is_clear_sky"] = merged["pv_clear_sky"] & merged["image_clear_sky"].fillna(False)
+    merged["is_overcast"] = (
+        (merged["mean_target_csi"] <= cfg.overcast_max_mean_target_csi)
+        & (merged["max_target_csi"] <= cfg.overcast_max_max_target_csi)
+        & (merged["p90_target_csi"] <= cfg.overcast_max_csi_p90)
+        & (merged["peak_pv_ratio"] <= cfg.overcast_max_pv_peak_ratio)
+    ).fillna(False)
+    merged["usable_for_cloud_mask_ref"] = (~merged["is_clear_sky"]) & (~merged["is_overcast"])
     merged["start_time"] = f"{cfg.start_hour:02d}:00"
     merged["end_time"] = f"{cfg.end_hour:02d}:59"
-    merged["notes"] = np.where(
-        merged["is_clear_sky"],
-        "auto clear sky by SPM daily R2 and image color heuristic",
-        "auto rejected by SPM daily R2 or image color heuristic",
+    merged["notes"] = np.select(
+        [merged["is_clear_sky"], merged["is_overcast"]],
+        [
+            "auto clear sky by SPM daily R2 and image color heuristic",
+            "auto overcast/rain by low CSI and low PV peak heuristic",
+        ],
+        default="auto non-clear usable for cloud-mask reference",
     )
 
     preferred_columns = [
@@ -246,6 +266,8 @@ def generate_clear_sky_table(cfg: Config) -> pd.DataFrame:
         "start_time",
         "end_time",
         "is_clear_sky",
+        "is_overcast",
+        "usable_for_cloud_mask_ref",
         "pv_clear_sky",
         "image_clear_sky",
         "pv_r2",
@@ -253,8 +275,12 @@ def generate_clear_sky_table(cfg: Config) -> pd.DataFrame:
         "pv_mae_w",
         "pv_rmse_w",
         "mean_target_csi",
+        "p90_target_csi",
         "min_target_csi",
         "max_target_csi",
+        "peak_pv_w",
+        "peak_clear_sky_w",
+        "peak_pv_ratio",
         "n_pv_samples",
         "n_image_samples",
         "blue_fraction_mean",
@@ -297,6 +323,10 @@ def parse_args() -> Config:
     parser.add_argument("--min-blue-fraction", type=float, default=0.35)
     parser.add_argument("--max-gray-fraction", type=float, default=0.60)
     parser.add_argument("--max-bright-white-fraction", type=float, default=0.35)
+    parser.add_argument("--overcast-max-mean-target-csi", type=float, default=0.20)
+    parser.add_argument("--overcast-max-max-target-csi", type=float, default=0.35)
+    parser.add_argument("--overcast-max-pv-peak-ratio", type=float, default=0.35)
+    parser.add_argument("--overcast-max-csi-p90", type=float, default=0.30)
     parser.add_argument("--start-hour", type=int, default=8)
     parser.add_argument("--end-hour", type=int, default=17)
     parser.add_argument("--min-day-samples", type=int, default=12)
@@ -313,6 +343,10 @@ def parse_args() -> Config:
         min_blue_fraction=float(args.min_blue_fraction),
         max_gray_fraction=float(args.max_gray_fraction),
         max_bright_white_fraction=float(args.max_bright_white_fraction),
+        overcast_max_mean_target_csi=float(args.overcast_max_mean_target_csi),
+        overcast_max_max_target_csi=float(args.overcast_max_max_target_csi),
+        overcast_max_pv_peak_ratio=float(args.overcast_max_pv_peak_ratio),
+        overcast_max_csi_p90=float(args.overcast_max_csi_p90),
         start_hour=int(args.start_hour),
         end_hour=int(args.end_hour),
         min_day_samples=int(args.min_day_samples),

@@ -57,8 +57,8 @@ def compute_roi_radiance(file_path, lat, lon, half_km=1.0, ch=2):
 
 def main():
     # HKUST 大致坐标；若需更准可自行替换
-    lat = 22.3364
-    lon = 114.2633
+    lat = 22.3325417961502
+    lon = 114.26698453139196
     radius_m = 600  # 建筑抓取半径，同时匹配辐亮度 1km
     half_km = 1.0
     ch = 2

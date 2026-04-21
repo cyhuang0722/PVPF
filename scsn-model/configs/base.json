@@ -12,6 +12,8 @@
     "samples_csv": "/Users/huangchouyue/Projects/PVPF/scsn-model/artifacts/dataset/samples.csv",
     "clear_sky_exclusion_csv": "/Users/huangchouyue/Projects/PVPF/data/clear_sky_generated.csv",
     "exclude_clear_sky_days": true,
+    "weather_interval_csv": "/Users/huangchouyue/Projects/PVPF/data/weather_interval_classification/weather_interval_index.csv",
+    "allowed_weather_tags": ["partly_cloudy", "cloudy"],
     "split_by_day": true,
     "image_size": [256, 256],
     "sequence_offsets_min": [-15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0],

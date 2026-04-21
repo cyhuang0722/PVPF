@@ -32,6 +32,8 @@ class PrepareSummary:
     n_samples: int
     n_samples_before_clear_sky_filter: int
     n_excluded_clear_sky_samples: int
+    n_samples_before_weather_filter: int
+    n_excluded_weather_samples: int
     n_missing_image: int
     n_missing_future_image: int
     n_missing_pv: int
@@ -40,6 +42,7 @@ class PrepareSummary:
     n_split_days_val: int
     n_split_days_test: int
     excluded_clear_sky_dates: list[str]
+    allowed_weather_tags: list[str]
     image_size: tuple[int, int]
     source_image_size: tuple[int, int]
 
@@ -144,6 +147,42 @@ def filter_clear_sky_samples(
     keep = ~(anchor_dates.isin(clear_sky_dates) | target_dates.isin(clear_sky_dates))
     excluded = int((~keep).sum())
     return df.loc[keep].reset_index(drop=True), excluded
+
+
+def load_weather_interval_tags(
+    weather_interval_csv: str | Path | None,
+    timezone: str,
+) -> pd.DataFrame:
+    if not weather_interval_csv:
+        return pd.DataFrame(columns=["ts_target", "weather_tag"])
+    csv_path = resolve_project_path(weather_interval_csv, must_exist=True)
+    df = pd.read_csv(csv_path)
+    required = {"interval_end", "weather_tag"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Weather interval CSV must contain columns {sorted(required)}: {csv_path}; missing {sorted(missing)}")
+    df = df[["interval_end", "weather_tag"]].copy()
+    df["ts_target"] = pd.to_datetime(df["interval_end"], errors="coerce")
+    df = df.dropna(subset=["ts_target", "weather_tag"])
+    if df["ts_target"].dt.tz is None:
+        df["ts_target"] = df["ts_target"].dt.tz_localize(timezone)
+    else:
+        df["ts_target"] = df["ts_target"].dt.tz_convert(timezone)
+    df["weather_tag"] = df["weather_tag"].astype(str).str.strip().str.lower()
+    return df[["ts_target", "weather_tag"]].drop_duplicates(subset=["ts_target"], keep="last")
+
+
+def filter_weather_interval_samples(
+    df: pd.DataFrame,
+    weather_tags: pd.DataFrame,
+    allowed_tags: set[str],
+) -> tuple[pd.DataFrame, int]:
+    if weather_tags.empty:
+        return df, 0
+    merged = df.merge(weather_tags, on="ts_target", how="left")
+    keep = merged["weather_tag"].isin(allowed_tags)
+    excluded = int((~keep).sum())
+    return merged.loc[keep].reset_index(drop=True), excluded
 
 
 def _day_split_counts(n_days: int, ratios: dict[str, float]) -> tuple[int, int, int]:
@@ -418,6 +457,26 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
             raise RuntimeError("No valid samples remain after clear-sky day exclusion.")
     else:
         n_excluded_clear_sky_samples = 0
+    n_samples_before_weather_filter = int(len(df))
+    allowed_weather_tags = [
+        str(tag).strip().lower()
+        for tag in data_cfg.get("allowed_weather_tags", [])
+        if str(tag).strip()
+    ]
+    weather_interval_csv = data_cfg.get("weather_interval_csv")
+    if allowed_weather_tags:
+        if not weather_interval_csv:
+            raise ValueError("data.allowed_weather_tags is set, but data.weather_interval_csv is not set.")
+        weather_tags = load_weather_interval_tags(weather_interval_csv, timezone)
+        df, n_excluded_weather_samples = filter_weather_interval_samples(
+            df,
+            weather_tags,
+            set(allowed_weather_tags),
+        )
+        if df.empty:
+            raise RuntimeError("No valid samples remain after weather interval filtering.")
+    else:
+        n_excluded_weather_samples = 0
     df = assign_splits(
         df,
         data_cfg["chronological_split"],
@@ -434,6 +493,8 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
         n_samples=int(len(df)),
         n_samples_before_clear_sky_filter=n_samples_before_clear_sky_filter,
         n_excluded_clear_sky_samples=int(n_excluded_clear_sky_samples),
+        n_samples_before_weather_filter=n_samples_before_weather_filter,
+        n_excluded_weather_samples=int(n_excluded_weather_samples),
         n_missing_image=int(missing_image),
         n_missing_future_image=int(missing_future_image),
         n_missing_pv=int(missing_pv),
@@ -442,6 +503,7 @@ def build_samples(config: dict) -> tuple[pd.DataFrame, PrepareSummary]:
         n_split_days_val=int(split_day_counts["val"]),
         n_split_days_test=int(split_day_counts["test"]),
         excluded_clear_sky_dates=sorted(ts.date().isoformat() for ts in clear_sky_dates),
+        allowed_weather_tags=allowed_weather_tags,
         image_size=(dst_h, dst_w),
         source_image_size=(source_h, source_w),
     )
@@ -463,6 +525,8 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "n_samples": summary.n_samples,
             "n_samples_before_clear_sky_filter": summary.n_samples_before_clear_sky_filter,
             "n_excluded_clear_sky_samples": summary.n_excluded_clear_sky_samples,
+            "n_samples_before_weather_filter": summary.n_samples_before_weather_filter,
+            "n_excluded_weather_samples": summary.n_excluded_weather_samples,
             "n_missing_image": summary.n_missing_image,
             "n_missing_future_image": summary.n_missing_future_image,
             "n_missing_pv": summary.n_missing_pv,
@@ -471,6 +535,7 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "n_split_days_val": summary.n_split_days_val,
             "n_split_days_test": summary.n_split_days_test,
             "excluded_clear_sky_dates": summary.excluded_clear_sky_dates,
+            "allowed_weather_tags": summary.allowed_weather_tags,
             "image_size": list(summary.image_size),
             "source_image_size": list(summary.source_image_size),
             "sample_hour_start": int(config["data"].get("sample_hour_start", 8)),
@@ -480,6 +545,9 @@ def save_samples(df: pd.DataFrame, summary: PrepareSummary, config: dict) -> Non
             "exclude_clear_sky_days": bool(config["data"].get("exclude_clear_sky_days", False)),
             "clear_sky_exclusion_csv": str(resolve_project_path(config["data"]["clear_sky_exclusion_csv"], must_exist=False))
             if config["data"].get("clear_sky_exclusion_csv")
+            else None,
+            "weather_interval_csv": str(resolve_project_path(config["data"]["weather_interval_csv"], must_exist=False))
+            if config["data"].get("weather_interval_csv")
             else None,
             "split_by_day": bool(config["data"].get("split_by_day", False)),
             "samples_csv": str(samples_csv),

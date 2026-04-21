@@ -37,6 +37,7 @@ scsn-model/
 - 预测头：输出 PV 高斯分布的 `mu / sigma`，再确定性得到 `q10 / q25 / q50 / q75 / q90`
 - 训练损失：`PV Gaussian NLL + KL + RBR reconstruction + future RBR mean Huber + future RBR variance Huber`
 - 外部 mask：不再使用外部 pseudo-mask supervision；`sky_mask_path` 只作为有效天空区域 mask
+- 天气筛选：`prepare_dataset.py` 可根据 weather interval classification 只保留 `partly_cloudy/cloudy` 样本，并排除 `clear_sky/overcast`
 
 ## 使用方法
 
@@ -109,3 +110,12 @@ python3 /Users/huangchouyue/Projects/PVPF/scsn-model/scripts/export_rbr_distribu
 - `loss.future_rbr_sun_weight`: `2.0`
 
 未来 15 分钟的 target 来自真实未来 15 张图的 RBR 统计量：pixel-level averaged RBR mean map 和 temporal RBR variance map。模型预测这两张 map，并用 Huber loss 训练；PV head 使用 sun-region/global 的 RBR mean 和 variance 生成 PV 分布。模型不再预测显式运动方向，也不再使用 current-sun latent attention；太阳权重只在未来目标太阳位置附近做 RBR mean/variance 读出与 map loss 加权。太阳权重的影响半径由模型按 sample 自适应预测，并限制在 `model.sun_attention_min_sigma` 到 `model.sun_attention_max_sigma` 之间。
+
+## Weather Interval Filtering
+
+`configs/base.json` 默认使用：
+
+- `data.weather_interval_csv`: `data/weather_interval_classification/weather_interval_index.csv`
+- `data.allowed_weather_tags`: `["partly_cloudy", "cloudy"]`
+
+`prepare_dataset.py` 会按样本的 `ts_target` 匹配 weather interval 的 `interval_end`，只保留允许的天气标签，并把 `weather_tag` 写入 `samples.csv`。
