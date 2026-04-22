@@ -51,7 +51,7 @@ in the same `prepare`, `data`, and `train` sections of `configs/base.json`.
 
 ```bash
 cd /path/to/PVPF/cloud-prob
-conda run -n torch_h5 python -u scripts/prepare_dataset.py --config configs/base.json
+conda run --no-capture-output -n torch_h5 python -u scripts/prepare_dataset.py --config configs/base.json
 ```
 
 By default this uses `${workspace_root}/data/calibration.json`.
@@ -71,7 +71,22 @@ cloud-prob/artifacts/dataset/prepare_summary.json
 
 ```bash
 cd /path/to/PVPF/cloud-prob
-conda run -n torch_h5 python -u scripts/train.py --config configs/base.json
+conda run --no-capture-output -n torch_h5 python -u scripts/train.py --config configs/base.json
+```
+
+Training prints startup diagnostics and batch progress. If server shared memory
+is available, set `train.num_workers` in `configs/base.json` to `4` or `8` to
+speed up image loading. If PyTorch reports a shared-memory or worker error, set
+it back to `0`.
+
+The default calibration target is `0.80` because the main plotted interval is
+`q10-q90`. The evaluator also writes `q05/q95` and `coverage_90` for checking a
+90% band without changing the model.
+
+If stdout is still silent, tail the live log written by the trainer:
+
+```bash
+tail -f artifacts/runs/latest_train.log
 ```
 
 Smoke test:
@@ -79,11 +94,11 @@ Smoke test:
 ```bash
 cd /path/to/PVPF/cloud-prob
 
-conda run -n torch_h5 python -u scripts/prepare_dataset.py \
+conda run --no-capture-output -n torch_h5 python -u scripts/prepare_dataset.py \
   --config configs/base.json \
   --max-samples 90
 
-conda run -n torch_h5 python -u scripts/train.py \
+conda run --no-capture-output -n torch_h5 python -u scripts/train.py \
   --config configs/base.json \
   --max-samples 90 \
   --epochs 2

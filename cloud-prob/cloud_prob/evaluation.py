@@ -61,10 +61,12 @@ def evaluate(
     values = {key: np.concatenate(parts) for key, parts in arrays.items()}
     values["scale"] = values["scale"] * float(scale_multiplier)
     frame = dataset.df.iloc[np.concatenate(indices)].reset_index(drop=True).copy()
-    quantiles = student_t_quantiles(values["loc"], values["scale"], values["df"], [0.10, 0.25, 0.50, 0.75, 0.90])
+    quantile_probs = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
+    quantile_names = ["q05", "q10", "q25", "q50", "q75", "q90", "q95"]
+    quantiles = student_t_quantiles(values["loc"], values["scale"], values["df"], quantile_probs)
     quantiles = np.clip(quantiles, 0.0, 1.25)
     clear = frame["target_clear_sky_w"].to_numpy(dtype=np.float32)
-    for idx, name in enumerate(["q10", "q25", "q50", "q75", "q90"]):
+    for idx, name in enumerate(quantile_names):
         frame[name] = quantiles[:, idx]
         frame[f"{name}_w"] = quantiles[:, idx] * clear
     for key, arr in values.items():
@@ -78,9 +80,13 @@ def evaluate(
             "baseline_mae": baseline["mae"],
             "baseline_rmse": baseline["rmse"],
             "coverage_80": interval_coverage(frame["q10_w"].to_numpy(), frame["q90_w"].to_numpy(), frame["target_pv_w"].to_numpy()),
+            "coverage_90": interval_coverage(frame["q05_w"].to_numpy(), frame["q95_w"].to_numpy(), frame["target_pv_w"].to_numpy()),
+            "pinball_q05_w": pinball_loss(frame["q05_w"].to_numpy(), frame["target_pv_w"].to_numpy(), 0.05),
             "pinball_q10_w": pinball_loss(frame["q10_w"].to_numpy(), frame["target_pv_w"].to_numpy(), 0.10),
             "pinball_q90_w": pinball_loss(frame["q90_w"].to_numpy(), frame["target_pv_w"].to_numpy(), 0.90),
+            "pinball_q95_w": pinball_loss(frame["q95_w"].to_numpy(), frame["target_pv_w"].to_numpy(), 0.95),
             "mean_interval_width_w": float(np.mean(frame["q90_w"].to_numpy() - frame["q10_w"].to_numpy())),
+            "mean_interval_width_90_w": float(np.mean(frame["q95_w"].to_numpy() - frame["q05_w"].to_numpy())),
             "scale_multiplier": float(scale_multiplier),
             "cloud_gate_mean": float(np.mean(values["cloud_gate"])),
         }

@@ -52,7 +52,9 @@
   "loss": {
     "nll_weight": 1.0,
     "interval_weight": 0.01,
-    "gate_entropy_weight": 0.001
+    "gate_entropy_weight": 0.001,
+    "residual_l1_weight": 0.02,
+    "stable_gate_l1_weight": 0.01
   },
   "train": {
     "artifact_root": "${project_root}/artifacts/runs",
@@ -62,9 +64,10 @@
     "weight_decay": 0.0005,
     "early_stopping_patience": 8,
     "early_stopping_min_epochs": 10,
-    "target_interval_coverage": 0.90,
+    "target_interval_coverage": 0.80,
     "calibration_steps": 8,
     "num_workers": 0,
+    "log_every_batches": 10,
     "weather_weights": {
       "clear_sky": 0.50,
       "overcast": 0.75,
