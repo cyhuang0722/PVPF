@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from cloud_prob.training import train_model
+from cloud_prob.utils import load_json
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train weather-conditioned sun-aware probabilistic PV model.")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs/base.json")
+    parser.add_argument("--epochs", type=int, default=0)
+    parser.add_argument("--max-samples", type=int, default=0)
+    args = parser.parse_args()
+    train_model(load_json(args.config), epochs_override=args.epochs, max_samples=args.max_samples)
+
+
+if __name__ == "__main__":
+    main()

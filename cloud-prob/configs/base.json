@@ -1,0 +1,48 @@
+{
+  "seed": 42,
+  "device": "auto",
+  "data": {
+    "samples_csv": "/Users/huangchouyue/Projects/PVPF/cloud-prob/artifacts/dataset/samples.csv",
+    "sky_mask_path": "/Users/huangchouyue/Projects/PVPF/data/sky_mask.png",
+    "image_size": 128,
+    "patch_size": 64,
+    "rbr_clip": 4.0
+  },
+  "model": {
+    "patch_channels": 6,
+    "weather_classes": 3,
+    "weather_embed_dim": 12,
+    "patch_embed_dim": 96,
+    "temporal_hidden_dim": 96,
+    "global_hidden_dim": 96,
+    "dropout": 0.25,
+    "stable_residual_limit": 0.15,
+    "cloudy_residual_limit": 0.75,
+    "min_sigma": 0.015,
+    "max_sigma": 0.65,
+    "min_df": 2.5,
+    "max_df": 30.0
+  },
+  "loss": {
+    "nll_weight": 1.0,
+    "interval_weight": 0.01,
+    "gate_entropy_weight": 0.001
+  },
+  "train": {
+    "artifact_root": "/Users/huangchouyue/Projects/PVPF/cloud-prob/artifacts/runs",
+    "batch_size": 16,
+    "epochs": 50,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0005,
+    "early_stopping_patience": 8,
+    "early_stopping_min_epochs": 10,
+    "target_interval_coverage": 0.90,
+    "calibration_steps": 8,
+    "num_workers": 0,
+    "weather_weights": {
+      "clear_sky": 0.50,
+      "overcast": 0.75,
+      "cloudy": 1.50
+    }
+  }
+}
