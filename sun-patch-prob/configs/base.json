@@ -13,28 +13,28 @@
     "weighted_sigmas_deg": [8, 16, 30]
   },
   "model": {
-    "hidden_dim": 128,
-    "dropout": 0.15,
+    "hidden_dim": 64,
+    "dropout": 0.30,
     "min_df": 2.5,
     "max_df": 30.0,
-    "min_sigma": 0.01,
-    "max_sigma": 0.45
+    "min_sigma": 0.015,
+    "max_sigma": 0.60
   },
   "loss": {
     "nll_weight": 1.0,
-    "aux_weight": 0.08,
-    "interval_weight": 0.02
+    "aux_weight": 0.04,
+    "interval_weight": 0.01
   },
   "train": {
     "artifact_root": "/Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/runs",
     "batch_size": 32,
     "epochs": 80,
-    "learning_rate": 0.0005,
-    "weight_decay": 0.0001,
+    "learning_rate": 0.0004,
+    "weight_decay": 0.001,
     "early_stopping_patience": 12,
     "early_stopping_min_epochs": 15,
+    "target_interval_coverage": 0.80,
     "num_workers": 0,
     "save_case_count": 8
   }
 }
-

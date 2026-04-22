@@ -55,6 +55,52 @@ conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/sc
   --config /Users/huangchouyue/Projects/PVPF/sun-patch-prob/configs/base.json
 ```
 
+The stronger RMSE candidate is:
+
+```bash
+conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/scripts/train.py \
+  --config /Users/huangchouyue/Projects/PVPF/sun-patch-prob/configs/wide_regularized.json
+```
+
+To prepare an all-weather sample table without touching `scsn-model/artifacts`,
+write it inside this project:
+
+```bash
+conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/scripts/prepare_samples.py \
+  --mode all-weather \
+  --out-dir /Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/dataset_all_weather
+```
+
+Feature-family ablation:
+
+```bash
+conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/scripts/feature_ablation.py \
+  --config /Users/huangchouyue/Projects/PVPF/sun-patch-prob/configs/all_weather_balanced.json
+```
+
+The cleaned feature pipeline disables hard disk/ring inputs by default and keeps
+global sky plus Gaussian weighted sun-region features:
+
+```bash
+conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/scripts/build_features.py \
+  --config /Users/huangchouyue/Projects/PVPF/sun-patch-prob/configs/all_weather_clean_gated.json \
+  --force
+```
+
+Weather-aware gate between the `global` and `weighted` ablation branches:
+
+```bash
+conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/scripts/gated_ensemble.py \
+  --ablation-dir /Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/ablations/<ablation_run>
+```
+
+V2 learned-gate model with target-sun patch CNN/GRU:
+
+```bash
+conda run -n torch_h5 python /Users/huangchouyue/Projects/PVPF/sun-patch-prob/scripts/train_v2.py \
+  --config /Users/huangchouyue/Projects/PVPF/sun-patch-prob/configs/v2_sunpatch_gated.json
+```
+
 For a quick smoke run:
 
 ```bash

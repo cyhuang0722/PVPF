@@ -1,0 +1,23 @@
+{
+  "mae": 2999.7653382447857,
+  "rmse": 3644.521578063455,
+  "bias": -2391.062752170209,
+  "n_samples": 15,
+  "baseline_mae": 2213.6184624660777,
+  "baseline_rmse": 2666.6966995373996,
+  "smart_persistence_mae": 2213.6184624660777,
+  "smart_persistence_rmse": 2666.6966995373996,
+  "persistence_mae": 2667.933138020833,
+  "persistence_rmse": 3149.147976493152,
+  "coverage_80": 0.7333333333333333,
+  "pinball_q10_w": 696.5103955321698,
+  "pinball_q90_w": 403.5961087876632,
+  "mean_interval_width_w": 9148.08240630298,
+  "scale_multiplier": 0.28357674181461334,
+  "weather_cloudy_n": 10,
+  "weather_cloudy_rmse": 3714.0810760416134,
+  "weather_cloudy_mae": 2993.505250197416,
+  "weather_partly_cloudy_n": 5,
+  "weather_partly_cloudy_rmse": 3501.259219208076,
+  "weather_partly_cloudy_mae": 3012.2855143395254
+}

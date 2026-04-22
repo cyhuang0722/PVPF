@@ -14,6 +14,9 @@ if str(ROOT) not in sys.path:
 
 from scsn_model.utils.io import resolve_project_path
 
+CVPR_LIGHT_BLUE = "rgb(142, 197, 252)"
+CVPR_DEEP_BLUE = "rgb(30, 78, 160)"
+
 
 def _parse_timestamp(value: str) -> datetime:
     value = value.strip()
@@ -33,11 +36,15 @@ def _load_split_csv(path: Path, split: str) -> list[dict]:
                     "ts_target": _parse_timestamp(row["ts_target"]),
                     "target_pv_w": float(row["target_pv_w"]),
                     "q10_w": float(row["q10_w"]),
+                    "q25_w": float(row.get("q25_w", row.get("q10_w", 0.0))),
                     "q50_w": float(row["q50_w"]),
+                    "q75_w": float(row.get("q75_w", row.get("q90_w", 0.0))),
                     "q90_w": float(row["q90_w"]),
                     "target_value": float(row.get("target_value", 0.0)),
                     "q10": float(row.get("q10", 0.0)),
+                    "q25": float(row.get("q25", row.get("q10", 0.0))),
                     "q50": float(row.get("q50", 0.0)),
+                    "q75": float(row.get("q75", row.get("q90", 0.0))),
                     "q90": float(row.get("q90", 0.0)),
                 }
             )
@@ -51,15 +58,19 @@ def _build_hover_text(row: dict) -> str:
         f"time={row['ts_target']}<br>"
         f"true={row['target_pv_w']:.1f} W<br>"
         f"q10={row['q10_w']:.1f} W ({row['q10']:.3f})<br>"
+        f"q25={row['q25_w']:.1f} W ({row['q25']:.3f})<br>"
         f"q50={row['q50_w']:.1f} W ({row['q50']:.3f})<br>"
+        f"q75={row['q75_w']:.1f} W ({row['q75']:.3f})<br>"
         f"q90={row['q90_w']:.1f} W ({row['q90']:.3f})"
     )
 
 
-def _add_split_traces(fig: go.Figure, rows: list[dict], split: str, color: str, show_legend: bool) -> None:
+def _add_split_traces(fig: go.Figure, rows: list[dict], split: str, show_legend: bool) -> None:
     x = [row["ts_target"] for row in rows]
     q10 = [row["q10_w"] for row in rows]
+    q25 = [row["q25_w"] for row in rows]
     q50 = [row["q50_w"] for row in rows]
+    q75 = [row["q75_w"] for row in rows]
     q90 = [row["q90_w"] for row in rows]
     target = [row["target_pv_w"] for row in rows]
     hover = [_build_hover_text(row) for row in rows]
@@ -83,7 +94,7 @@ def _add_split_traces(fig: go.Figure, rows: list[dict], split: str, color: str, 
             mode="lines",
             line={"width": 0},
             fill="tonexty",
-            fillcolor=color.replace("rgb", "rgba").replace(")", ", 0.16)"),
+            fillcolor=CVPR_LIGHT_BLUE.replace("rgb", "rgba").replace(")", ", 0.24)"),
             hoverinfo="skip",
             showlegend=show_legend,
             legendgroup=split,
@@ -93,9 +104,35 @@ def _add_split_traces(fig: go.Figure, rows: list[dict], split: str, color: str, 
     fig.add_trace(
         go.Scatter(
             x=x,
+            y=q75,
+            mode="lines",
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+            legendgroup=split,
+            name=f"{split} q75 upper",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=q25,
+            mode="lines",
+            line={"width": 0},
+            fill="tonexty",
+            fillcolor=CVPR_DEEP_BLUE.replace("rgb", "rgba").replace(")", ", 0.28)"),
+            hoverinfo="skip",
+            showlegend=show_legend,
+            legendgroup=split,
+            name=f"{split} q25-q75",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
             y=q10,
             mode="lines",
-            line={"color": color, "dash": "dot", "width": 1.2},
+            line={"color": CVPR_DEEP_BLUE, "dash": "dot", "width": 1.2},
             text=hover,
             hovertemplate="%{text}<extra></extra>",
             showlegend=show_legend,
@@ -106,9 +143,22 @@ def _add_split_traces(fig: go.Figure, rows: list[dict], split: str, color: str, 
     fig.add_trace(
         go.Scatter(
             x=x,
+            y=q25,
+            mode="lines",
+            line={"color": CVPR_DEEP_BLUE, "dash": "dash", "width": 1.2},
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=show_legend,
+            legendgroup=split,
+            name=f"{split} q25",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
             y=q50,
             mode="lines",
-            line={"color": color, "width": 2.4},
+            line={"color": CVPR_DEEP_BLUE, "width": 2.6},
             text=hover,
             hovertemplate="%{text}<extra></extra>",
             showlegend=show_legend,
@@ -119,9 +169,22 @@ def _add_split_traces(fig: go.Figure, rows: list[dict], split: str, color: str, 
     fig.add_trace(
         go.Scatter(
             x=x,
+            y=q75,
+            mode="lines",
+            line={"color": CVPR_DEEP_BLUE, "dash": "dash", "width": 1.2},
+            text=hover,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=show_legend,
+            legendgroup=split,
+            name=f"{split} q75",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
             y=q90,
             mode="lines",
-            line={"color": color, "dash": "dot", "width": 1.2},
+            line={"color": CVPR_DEEP_BLUE, "dash": "dot", "width": 1.2},
             text=hover,
             hovertemplate="%{text}<extra></extra>",
             showlegend=show_legend,
@@ -149,19 +212,12 @@ def build_figure(run_dir: Path) -> tuple[go.Figure, Path]:
         split: _load_split_csv(run_dir / f"predictions_{split}.csv", split)
         for split in ("train", "val", "test")
     }
-    colors = {
-        "train": "rgb(31, 119, 180)",
-        "val": "rgb(255, 127, 14)",
-        "test": "rgb(44, 160, 44)",
-    }
-
     fig = go.Figure()
     for idx, split in enumerate(("train", "val", "test")):
         _add_split_traces(
             fig=fig,
             rows=split_rows[split],
             split=split,
-            color=colors[split],
             show_legend=True,
         )
 

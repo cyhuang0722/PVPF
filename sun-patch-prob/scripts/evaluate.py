@@ -26,6 +26,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a trained sun-patch probabilistic PV model.")
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--split", choices=["train", "val", "test"], default="test")
+    parser.add_argument("--uncalibrated", action="store_true")
     args = parser.parse_args()
 
     config = load_json(args.run_dir / "run_config.json")
@@ -39,7 +40,11 @@ def main() -> None:
     device = resolve_device(config.get("device", "auto"))
     model.load_state_dict(torch.load(args.run_dir / "best_model.pt", map_location=device))
     model.to(device)
-    pred, metrics = evaluate(model, dataset, device)
+    calibration_path = args.run_dir / "calibration.json"
+    scale_multiplier = 1.0
+    if calibration_path.exists() and not args.uncalibrated:
+        scale_multiplier = float(load_json(calibration_path).get("scale_multiplier", 1.0))
+    pred, metrics = evaluate(model, dataset, device, scale_multiplier=scale_multiplier)
     pred.to_csv(args.run_dir / f"predictions_{args.split}_eval.csv", index=False)
     save_json(args.run_dir / f"metrics_{args.split}_eval.json", metrics)
     save_forecast_band(pred, args.run_dir / "figures" / f"forecast_band_{args.split}_eval.png", f"{args.split} eval forecast")

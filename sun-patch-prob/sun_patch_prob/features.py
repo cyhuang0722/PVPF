@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -111,13 +112,17 @@ def extract_row_features(row: pd.Series, mask: np.ndarray, config: dict, source_
     luminance = np.mean(np.where(np.isfinite(frames), frames, 0.0), axis=-1)
     luminance[:, ~mask] = np.nan
 
-    dist_now = distance_deg_map(float(row["sun_x_px"]), float(row["sun_y_px"]), image_size, f_px_per_rad_256)
     dist_target = distance_deg_map(float(row["target_sun_x_px"]), float(row["target_sun_y_px"]), image_size, f_px_per_rad_256)
     regions = {"global": mask}
-    for lo, hi in data_cfg.get("rings_deg", [[0, 5], [5, 15], [15, 30]]):
-        regions[f"target_ring_{int(lo)}_{int(hi)}deg"] = mask & (dist_target > float(lo)) & (dist_target <= float(hi))
-    regions["target_disk_0_5deg"] = mask & (dist_target <= 5.0)
-    regions["current_disk_0_5deg"] = mask & (dist_now <= 5.0)
+    if bool(data_cfg.get("include_hard_regions", False)):
+        dist_now = distance_deg_map(float(row["sun_x_px"]), float(row["sun_y_px"]), image_size, f_px_per_rad_256)
+        for lo, hi in data_cfg.get("rings_deg", [[5, 15], [15, 30]]):
+            lo_f, hi_f = float(lo), float(hi)
+            if hi_f <= lo_f:
+                continue
+            regions[f"target_ring_{int(lo_f)}_{int(hi_f)}deg"] = mask & (dist_target > lo_f) & (dist_target <= hi_f)
+        regions["target_disk_0_5deg"] = mask & (dist_target <= 5.0)
+        regions["current_disk_0_5deg"] = mask & (dist_now <= 5.0)
 
     out: dict[str, float | str] = {}
     add_region_features("past", rbr, luminance, regions, out)
@@ -137,7 +142,7 @@ def extract_row_features(row: pd.Series, mask: np.ndarray, config: dict, source_
         future = np.stack([load_rgb(path, image_size) for path in future_paths], axis=0)
         future[:, ~mask, :] = np.nan
         future_rbr = build_rbr(future, rbr_clip)
-        disk = regions["target_disk_0_5deg"]
+        disk = mask & (dist_target <= 5.0)
         future_disk_mean, _ = masked_series(future_rbr, disk)
         past_disk_mean, _ = masked_series(rbr, disk)
         out["aux_future_sun_mean"] = float(np.nanmean(future_disk_mean))
@@ -167,16 +172,50 @@ def extract_row_features(row: pd.Series, mask: np.ndarray, config: dict, source_
 
     target_clear = float(row["target_clear_sky_w"])
     target_csi = float(row["target_value"])
-    baseline_csi = float(np.clip(past_pv[-1] / max(target_clear, 1e-6), 0.0, 1.2))
-    out["baseline_csi"] = baseline_csi
-    out["baseline_pv_w"] = float(baseline_csi * target_clear)
+    anchor_clear = float(row["anchor_clear_sky_w"]) if "anchor_clear_sky_w" in row and np.isfinite(float(row["anchor_clear_sky_w"])) else target_clear
+    smart_csi = float(np.clip(past_pv[-1] / max(anchor_clear, 1e-6), 0.0, 1.2))
+    target_clear_persistence_csi = float(np.clip(past_pv[-1] / max(target_clear, 1e-6), 0.0, 1.2))
+    out["baseline_csi"] = smart_csi
+    out["baseline_pv_w"] = float(smart_csi * target_clear)
     out["target_csi"] = target_csi
     out["target_pv_w"] = float(row["target_pv_w"])
     out["target_clear_sky_w"] = target_clear
+    out["anchor_clear_sky_w"] = anchor_clear
+    out["smart_persistence_csi"] = smart_csi
+    out["smart_persistence_pv_w"] = float(smart_csi * target_clear)
+    out["persistence_pv_w"] = float(past_pv[-1])
+    out["persistence_csi_target_clear"] = target_clear_persistence_csi
     out["ts_anchor"] = str(row["ts_anchor"])
     out["ts_target"] = str(row["ts_target"])
     out["split"] = str(row["split"])
+    weather_tag = str(row.get("weather_tag", "unknown")).strip().lower() or "unknown"
+    out["weather_tag"] = weather_tag
+    for tag in ("clear_sky", "overcast", "cloudy", "partly_cloudy", "unknown"):
+        out[f"weather_{tag}"] = 1.0 if weather_tag == tag else 0.0
     return out
+
+
+def add_anchor_clear_sky(samples: pd.DataFrame, data_cfg: dict, source_cfg: dict) -> pd.DataFrame:
+    samples = samples.copy()
+    if "anchor_clear_sky_w" in samples.columns:
+        return samples
+    source_config_path = local_path(data_cfg["source_config_json"])
+    scsn_root = source_config_path.parents[1]
+    if str(scsn_root) not in sys.path:
+        sys.path.insert(0, str(scsn_root))
+    from scsn_model.data.solar_geometry import Calibration, compute_clear_sky_power
+
+    source_data = source_cfg["data"]
+    calib = Calibration.from_json(local_path(source_data["calibration_json"]))
+    anchor_times = pd.to_datetime(samples["ts_anchor"]).tolist()
+    clear = compute_clear_sky_power(
+        anchor_times,
+        calib,
+        peak_power_w=float(source_data["peak_power_w"]),
+        floor_w=float(source_data["clear_sky_floor_w"]),
+    )
+    samples["anchor_clear_sky_w"] = clear.to_numpy(dtype=np.float32)
+    return samples
 
 
 def build_feature_table(config: dict, max_samples: int = 0, progress_every: int = 100) -> pd.DataFrame:
@@ -189,6 +228,7 @@ def build_feature_table(config: dict, max_samples: int = 0, progress_every: int 
         for _, part in samples.groupby("split", sort=False):
             parts.append(part.head(min(per_split, len(part))))
         samples = pd.concat(parts, ignore_index=True).head(max_samples).copy()
+    samples = add_anchor_clear_sky(samples, data_cfg, source_cfg)
     mask = load_mask(data_cfg["sky_mask_path"], int(data_cfg["image_size"]))
     rows = []
     total = len(samples)

@@ -14,9 +14,14 @@ META_COLUMNS = {
     "split",
     "target_pv_w",
     "target_clear_sky_w",
+    "anchor_clear_sky_w",
     "target_csi",
     "baseline_csi",
     "baseline_pv_w",
+    "smart_persistence_csi",
+    "smart_persistence_pv_w",
+    "persistence_pv_w",
+    "persistence_csi_target_clear",
     "aux_future_sun_mean",
     "aux_future_sun_var",
     "aux_future_sun_delta",
@@ -45,7 +50,7 @@ def fit_feature_spec(df: pd.DataFrame, feature_columns: list[str]) -> FeatureSpe
 
 
 class SunPatchFeatureDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, spec: FeatureSpec) -> None:
+    def __init__(self, df: pd.DataFrame, spec: FeatureSpec, weather_weights: dict[str, float] | None = None) -> None:
         self.df = df.reset_index(drop=True).copy()
         x = self.df[spec.feature_columns].to_numpy(dtype=np.float32)
         x = np.where(np.isfinite(x), x, spec.mean)
@@ -54,6 +59,11 @@ class SunPatchFeatureDataset(Dataset):
         self.baseline = self.df["baseline_csi"].to_numpy(dtype=np.float32)[:, None]
         self.aux = self.df[["aux_future_sun_mean", "aux_future_sun_var", "aux_future_sun_delta"]].to_numpy(dtype=np.float32)
         self.aux = np.where(np.isfinite(self.aux), self.aux, 0.0).astype(np.float32)
+        weights = weather_weights or {}
+        if "weather_tag" in self.df:
+            self.weight = self.df["weather_tag"].astype(str).str.strip().str.lower().map(weights).fillna(1.0).to_numpy(dtype=np.float32)[:, None]
+        else:
+            self.weight = np.ones((len(self.df), 1), dtype=np.float32)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -64,6 +74,6 @@ class SunPatchFeatureDataset(Dataset):
             "target": torch.from_numpy(self.target[index]),
             "baseline": torch.from_numpy(self.baseline[index]),
             "aux": torch.from_numpy(self.aux[index]),
+            "weight": torch.from_numpy(self.weight[index]),
             "index": torch.tensor(index, dtype=torch.long),
         }
-

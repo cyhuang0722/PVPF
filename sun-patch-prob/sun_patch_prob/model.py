@@ -57,12 +57,25 @@ class StudentTResidualModel(nn.Module):
         }
 
 
-def student_t_nll(loc: torch.Tensor, scale: torch.Tensor, df: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def student_t_nll(
+    loc: torch.Tensor,
+    scale: torch.Tensor,
+    df: torch.Tensor,
+    target: torch.Tensor,
+    weight: torch.Tensor | None = None,
+) -> torch.Tensor:
     target = target.view_as(loc)
     dist = torch.distributions.StudentT(df=df.clamp_min(2.01), loc=loc, scale=scale.clamp_min(1e-4))
-    return -dist.log_prob(target).mean()
+    loss = -dist.log_prob(target)
+    if weight is None:
+        return loss.mean()
+    weight = weight.view_as(loss)
+    return (loss * weight).sum() / weight.sum().clamp_min(1e-6)
 
 
-def interval_width_regularizer(scale: torch.Tensor) -> torch.Tensor:
-    return F.smooth_l1_loss(scale, torch.full_like(scale, 0.08))
-
+def interval_width_regularizer(scale: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
+    loss = F.smooth_l1_loss(scale, torch.full_like(scale, 0.08), reduction="none")
+    if weight is None:
+        return loss.mean()
+    weight = weight.view_as(loss)
+    return (loss * weight).sum() / weight.sum().clamp_min(1e-6)

@@ -1,0 +1,10 @@
+{
+  "ablation_dir": "sun-patch-prob/artifacts/ablations/ablation_20260422-103712",
+  "global_branch": "global",
+  "weighted_branch": "weighted",
+  "hard_weight": 0.8,
+  "stable_penalty_weight": 1.0,
+  "alpha_hard": 0.9500000000000001,
+  "alpha_stable": 0.25,
+  "val_score": 1.6979518872238843
+}
