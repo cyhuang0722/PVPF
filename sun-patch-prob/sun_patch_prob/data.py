@@ -68,9 +68,16 @@ def fit_feature_spec(df: pd.DataFrame, feature_columns: list[str]) -> FeatureSpe
     return FeatureSpec(feature_columns=feature_columns, mean=mean, std=std)
 
 
+def require_file(path: str | Path, label: str) -> Path:
+    resolved = Path(path)
+    if not resolved.exists():
+        raise FileNotFoundError(f"{label} not found: {resolved}")
+    return resolved
+
+
 def prepare_frames(samples_csv: str | Path, feature_csv: str | Path, max_samples: int = 0) -> tuple[DataFrames, list[str]]:
-    samples = pd.read_csv(samples_csv)
-    features = pd.read_csv(feature_csv)
+    samples = pd.read_csv(require_file(samples_csv, "samples_csv"))
+    features = pd.read_csv(require_file(feature_csv, "feature_csv"))
     for frame in (samples, features):
         frame["ts_anchor"] = pd.to_datetime(frame["ts_anchor"]).astype(str)
         frame["ts_target"] = pd.to_datetime(frame["ts_target"]).astype(str)

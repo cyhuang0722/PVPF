@@ -10,17 +10,23 @@ import numpy as np
 import torch
 
 
-PROJECT_ROOT = Path("/Users/huangchouyue/Projects/PVPF")
-REMOTE_ROOT = "/home/chuangbn/projects/PVPF"
-
-
-def local_path(value: str | Path) -> Path:
-    text = str(value)
-    return Path(text.replace(REMOTE_ROOT, str(PROJECT_ROOT)))
+def expand_path_vars(payload: Any, variables: dict[str, str]) -> Any:
+    if isinstance(payload, dict):
+        return {key: expand_path_vars(value, variables) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [expand_path_vars(value, variables) for value in payload]
+    if isinstance(payload, str):
+        out = payload
+        for key, value in variables.items():
+            out = out.replace("${" + key + "}", str(value))
+        return out
+    return payload
 
 
 def load_json(path: str | Path) -> dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    variables = {str(key): str(value) for key, value in payload.get("paths", {}).items()}
+    return expand_path_vars(payload, variables)
 
 
 def save_json(path: str | Path, payload: dict[str, Any]) -> None:

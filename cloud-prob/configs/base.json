@@ -1,9 +1,35 @@
 {
   "seed": 42,
   "device": "auto",
+  "paths": {
+    "workspace_root": "/Users/huangchouyue/Projects/PVPF",
+    "project_root": "/Users/huangchouyue/Projects/PVPF/cloud-prob"
+  },
+  "prepare": {
+    "weather_index_csv": "${workspace_root}/data/weather_interval_classification/weather_interval_index.csv",
+    "camera_root": "${workspace_root}/data/camera_data/resized_256",
+    "sky_mask_path": "${workspace_root}/data/sky_mask.png",
+    "calibration_json": "${workspace_root}/data/calibration.json",
+    "out_csv": "${project_root}/artifacts/dataset/samples.csv",
+    "image_size": 128,
+    "sequence_steps": 16,
+    "sequence_step_minutes": 1,
+    "image_tolerance_seconds": 45.0,
+    "history_intervals": 4,
+    "peak_power_w": 66300.0,
+    "max_samples": 0,
+    "sun_coordinate_size": 256,
+    "azimuth_offset_deg": 330.71337038338856,
+    "azimuth_clockwise": false,
+    "sun_image_offset_x_px": 0.0,
+    "sun_image_offset_y_px": 0.0,
+    "sun_projection_cx_px": 128.76104600689308,
+    "sun_projection_cy_px": 123.91888618003209,
+    "sun_projection_f_px_per_rad": 71.27383562943854
+  },
   "data": {
-    "samples_csv": "/Users/huangchouyue/Projects/PVPF/cloud-prob/artifacts/dataset/samples.csv",
-    "sky_mask_path": "/Users/huangchouyue/Projects/PVPF/data/sky_mask.png",
+    "samples_csv": "${project_root}/artifacts/dataset/samples.csv",
+    "sky_mask_path": "${workspace_root}/data/sky_mask.png",
     "image_size": 128,
     "patch_size": 64,
     "rbr_clip": 4.0
@@ -29,7 +55,7 @@
     "gate_entropy_weight": 0.001
   },
   "train": {
-    "artifact_root": "/Users/huangchouyue/Projects/PVPF/cloud-prob/artifacts/runs",
+    "artifact_root": "${project_root}/artifacts/runs",
     "batch_size": 16,
     "epochs": 50,
     "learning_rate": 0.0003,

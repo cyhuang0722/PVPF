@@ -12,10 +12,10 @@ import pandas as pd
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
 from cloud_prob.solar_geometry import Calibration, build_solar_feature_vector, compute_solar_position, project_sun_to_image
+from cloud_prob.utils import load_json
 
 
 TIMESTAMP_RE = re.compile(r"_(\d{17})_TIMING\.(?:jpg|jpeg|png)$", re.IGNORECASE)
@@ -41,6 +41,41 @@ WEATHER_KEEP_COLUMNS = [
     "zenith_deg",
     "target_zenith_deg",
 ]
+PATH_FIELDS = {"weather_index_csv", "camera_root", "sky_mask_path", "calibration_json", "out_csv"}
+
+
+def apply_config_defaults(args: argparse.Namespace, config: dict) -> argparse.Namespace:
+    prepare_cfg = config.get("prepare", {})
+    data_cfg = config.get("data", {})
+    defaults = {
+        "weather_index_csv": prepare_cfg.get("weather_index_csv"),
+        "camera_root": prepare_cfg.get("camera_root"),
+        "sky_mask_path": prepare_cfg.get("sky_mask_path", data_cfg.get("sky_mask_path")),
+        "calibration_json": prepare_cfg.get("calibration_json"),
+        "sun_coordinate_size": prepare_cfg.get("sun_coordinate_size", 256),
+        "azimuth_offset_deg": prepare_cfg.get("azimuth_offset_deg", 330.71337038338856),
+        "azimuth_clockwise": prepare_cfg.get("azimuth_clockwise", False),
+        "sun_image_offset_x_px": prepare_cfg.get("sun_image_offset_x_px", 0.0),
+        "sun_image_offset_y_px": prepare_cfg.get("sun_image_offset_y_px", 0.0),
+        "sun_projection_cx_px": prepare_cfg.get("sun_projection_cx_px", 128.76104600689308),
+        "sun_projection_cy_px": prepare_cfg.get("sun_projection_cy_px", 123.91888618003209),
+        "sun_projection_f_px_per_rad": prepare_cfg.get("sun_projection_f_px_per_rad", 71.27383562943854),
+        "out_csv": prepare_cfg.get("out_csv", data_cfg.get("samples_csv")),
+        "image_size": prepare_cfg.get("image_size", data_cfg.get("image_size", 128)),
+        "sequence_steps": prepare_cfg.get("sequence_steps", 16),
+        "sequence_step_minutes": prepare_cfg.get("sequence_step_minutes", 1),
+        "image_tolerance_seconds": prepare_cfg.get("image_tolerance_seconds", 45.0),
+        "history_intervals": prepare_cfg.get("history_intervals", 4),
+        "peak_power_w": prepare_cfg.get("peak_power_w", 66300.0),
+        "max_samples": prepare_cfg.get("max_samples", 0),
+    }
+    missing = [key for key in ("weather_index_csv", "camera_root", "sky_mask_path", "calibration_json", "out_csv") if defaults.get(key) in (None, "")]
+    if missing:
+        raise ValueError(f"Missing required prepare config fields: {', '.join(missing)}")
+    for key, value in defaults.items():
+        if getattr(args, key) is None:
+            setattr(args, key, Path(value) if key in PATH_FIELDS else value)
+    return args
 
 
 def parse_image_time(path: Path) -> pd.Timestamp | None:
@@ -235,27 +270,29 @@ def build_samples(args: argparse.Namespace) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare cloud-prob training samples from weather interval classification.")
-    parser.add_argument("--weather-index-csv", type=Path, default=WORKSPACE / "data/weather_interval_classification/weather_interval_index.csv")
-    parser.add_argument("--camera-root", type=Path, default=WORKSPACE / "data/camera_data/resized_256")
-    parser.add_argument("--sky-mask-path", type=Path, default=WORKSPACE / "data/sky_mask.png")
-    parser.add_argument("--calibration-json", type=Path, default=WORKSPACE / "data/calibration.json")
-    parser.add_argument("--sun-coordinate-size", type=int, default=256)
-    parser.add_argument("--azimuth-offset-deg", type=float, default=330.71337038338856)
-    parser.add_argument("--azimuth-clockwise", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--sun-image-offset-x-px", type=float, default=0.0)
-    parser.add_argument("--sun-image-offset-y-px", type=float, default=0.0)
-    parser.add_argument("--sun-projection-cx-px", type=float, default=128.76104600689308)
-    parser.add_argument("--sun-projection-cy-px", type=float, default=123.91888618003209)
-    parser.add_argument("--sun-projection-f-px-per-rad", type=float, default=71.27383562943854)
-    parser.add_argument("--out-csv", type=Path, default=ROOT / "artifacts/dataset/samples.csv")
-    parser.add_argument("--image-size", type=int, default=128)
-    parser.add_argument("--sequence-steps", type=int, default=16)
-    parser.add_argument("--sequence-step-minutes", type=int, default=1)
-    parser.add_argument("--image-tolerance-seconds", type=float, default=45.0)
-    parser.add_argument("--history-intervals", type=int, default=4)
-    parser.add_argument("--peak-power-w", type=float, default=66300.0)
-    parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument("--config", type=Path, default=ROOT / "configs/base.json")
+    parser.add_argument("--weather-index-csv", type=Path, default=None)
+    parser.add_argument("--camera-root", type=Path, default=None)
+    parser.add_argument("--sky-mask-path", type=Path, default=None)
+    parser.add_argument("--calibration-json", type=Path, default=None)
+    parser.add_argument("--sun-coordinate-size", type=int, default=None)
+    parser.add_argument("--azimuth-offset-deg", type=float, default=None)
+    parser.add_argument("--azimuth-clockwise", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--sun-image-offset-x-px", type=float, default=None)
+    parser.add_argument("--sun-image-offset-y-px", type=float, default=None)
+    parser.add_argument("--sun-projection-cx-px", type=float, default=None)
+    parser.add_argument("--sun-projection-cy-px", type=float, default=None)
+    parser.add_argument("--sun-projection-f-px-per-rad", type=float, default=None)
+    parser.add_argument("--out-csv", type=Path, default=None)
+    parser.add_argument("--image-size", type=int, default=None)
+    parser.add_argument("--sequence-steps", type=int, default=None)
+    parser.add_argument("--sequence-step-minutes", type=int, default=None)
+    parser.add_argument("--image-tolerance-seconds", type=float, default=None)
+    parser.add_argument("--history-intervals", type=int, default=None)
+    parser.add_argument("--peak-power-w", type=float, default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
     args = parser.parse_args()
+    args = apply_config_defaults(args, load_json(args.config))
 
     samples = build_samples(args)
     args.out_csv.parent.mkdir(parents=True, exist_ok=True)

@@ -10,9 +10,6 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .utils import local_path
-
-
 WEATHER_TO_INDEX = {"clear_sky": 0, "cloudy": 1, "overcast": 2}
 INDEX_TO_WEATHER = {value: key for key, value in WEATHER_TO_INDEX.items()}
 
@@ -55,7 +52,7 @@ def parse_json_list(value: object) -> list:
 
 
 def require_file(path: str | Path, label: str) -> Path:
-    resolved = local_path(path)
+    resolved = Path(path)
     if not resolved.exists():
         raise FileNotFoundError(f"{label} not found: {resolved}")
     return resolved

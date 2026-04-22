@@ -36,11 +36,25 @@ Outputs:
 
 ## Prepare Dataset
 
-```bash
-conda run -n torch_h5 python -u /Users/huangchouyue/Projects/PVPF/cloud-prob/scripts/prepare_dataset.py
+Before running on a new machine, edit only `configs/base.json`:
+
+```json
+"paths": {
+  "workspace_root": "/path/to/PVPF",
+  "project_root": "/path/to/PVPF/cloud-prob"
+}
 ```
 
-By default this uses `/Users/huangchouyue/Projects/PVPF/data/calibration.json`.
+All data, output, mask, calibration, and run paths are expanded from these two
+values. If your server data layout is different, adjust the explicit path fields
+in the same `prepare`, `data`, and `train` sections of `configs/base.json`.
+
+```bash
+cd /path/to/PVPF/cloud-prob
+conda run -n torch_h5 python -u scripts/prepare_dataset.py --config configs/base.json
+```
+
+By default this uses `${workspace_root}/data/calibration.json`.
 The dataset builder computes solar azimuth/zenith with `pvlib`, then projects
 the current and target sun positions into the 256x256 sky image using the
 historically fitted camera orientation and fisheye projection parameters from
@@ -56,18 +70,21 @@ cloud-prob/artifacts/dataset/prepare_summary.json
 ## Train
 
 ```bash
-conda run -n torch_h5 python -u /Users/huangchouyue/Projects/PVPF/cloud-prob/scripts/train.py \
-  --config /Users/huangchouyue/Projects/PVPF/cloud-prob/configs/base.json
+cd /path/to/PVPF/cloud-prob
+conda run -n torch_h5 python -u scripts/train.py --config configs/base.json
 ```
 
 Smoke test:
 
 ```bash
-conda run -n torch_h5 python -u /Users/huangchouyue/Projects/PVPF/cloud-prob/scripts/prepare_dataset.py \
+cd /path/to/PVPF/cloud-prob
+
+conda run -n torch_h5 python -u scripts/prepare_dataset.py \
+  --config configs/base.json \
   --max-samples 90
 
-conda run -n torch_h5 python -u /Users/huangchouyue/Projects/PVPF/cloud-prob/scripts/train.py \
-  --config /Users/huangchouyue/Projects/PVPF/cloud-prob/configs/base.json \
+conda run -n torch_h5 python -u scripts/train.py \
+  --config configs/base.json \
   --max-samples 90 \
   --epochs 2
 ```

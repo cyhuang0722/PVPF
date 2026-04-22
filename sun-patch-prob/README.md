@@ -32,8 +32,10 @@ sun-patch-prob/
   scripts/train.py
   sun_patch_prob/
     data.py
+    evaluation.py
     metrics.py
     model.py
+    training.py
     utils.py
     viz.py
   artifacts/
@@ -41,6 +43,11 @@ sun-patch-prob/
     features/
     runs/
 ```
+
+Expected prepared data files:
+
+- `artifacts/dataset_all_weather/samples.csv`
+- `artifacts/features/global_features.csv.gz`
 
 ## Train
 
