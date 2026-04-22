@@ -2,39 +2,47 @@
   "seed": 42,
   "device": "auto",
   "data": {
-    "samples_csv": "/Users/huangchouyue/Projects/PVPF/scsn-model/artifacts/dataset/samples.csv",
+    "samples_csv": "/Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/dataset_all_weather/samples.csv",
+    "feature_csv": "/Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/features/global_features.csv.gz",
     "sky_mask_path": "/Users/huangchouyue/Projects/PVPF/data/sky_mask.png",
-    "source_config_json": "/Users/huangchouyue/Projects/PVPF/scsn-model/configs/base.json",
-    "feature_csv": "/Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/features/features.csv.gz",
     "image_size": 128,
-    "peak_power_w": 66300.0,
-    "rbr_clip": 4.0,
-    "rings_deg": [[0, 5], [5, 15], [15, 30]],
-    "weighted_sigmas_deg": [8, 16, 30]
+    "patch_size": 64
   },
   "model": {
-    "hidden_dim": 64,
-    "dropout": 0.30,
-    "min_df": 2.5,
-    "max_df": 30.0,
+    "patch_channels": 6,
+    "patch_embed_dim": 96,
+    "global_hidden_dim": 96,
+    "temporal_hidden_dim": 96,
+    "dropout": 0.25,
+    "stable_residual_limit": 0.15,
+    "hard_residual_limit": 0.75,
     "min_sigma": 0.015,
-    "max_sigma": 0.60
+    "max_sigma": 0.65,
+    "min_df": 2.5,
+    "max_df": 30.0
   },
   "loss": {
     "nll_weight": 1.0,
     "aux_weight": 0.04,
-    "interval_weight": 0.01
+    "interval_weight": 0.01,
+    "gate_entropy_weight": 0.001
   },
   "train": {
     "artifact_root": "/Users/huangchouyue/Projects/PVPF/sun-patch-prob/artifacts/runs",
-    "batch_size": 32,
-    "epochs": 80,
-    "learning_rate": 0.0004,
-    "weight_decay": 0.001,
-    "early_stopping_patience": 12,
-    "early_stopping_min_epochs": 15,
-    "target_interval_coverage": 0.80,
+    "batch_size": 16,
+    "epochs": 50,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0005,
+    "early_stopping_patience": 8,
+    "early_stopping_min_epochs": 10,
+    "target_interval_coverage": 0.90,
+    "calibration_steps": 8,
     "num_workers": 0,
-    "save_case_count": 8
+    "weather_weights": {
+      "clear_sky": 0.35,
+      "overcast": 0.50,
+      "cloudy": 1.40,
+      "partly_cloudy": 2.00
+    }
   }
 }
