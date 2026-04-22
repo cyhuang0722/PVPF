@@ -84,8 +84,9 @@ class ImageSequenceDataset(Dataset):
     def _select_paths(self, paths: list[str]) -> list[str]:
         if self.sequence_mode == "latest":
             return [paths[-1]]
-        if self.max_steps > 0:
-            return paths[-self.max_steps :]
+        if self.max_steps > 0 and len(paths) > self.max_steps:
+            indices = np.linspace(0, len(paths) - 1, self.max_steps).round().astype(int)
+            return [paths[int(idx)] for idx in indices]
         return paths
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
@@ -101,4 +102,3 @@ class ImageSequenceDataset(Dataset):
             "weather_idx": torch.tensor(self.weather_idx[index], dtype=torch.long),
             "index": torch.tensor(index, dtype=torch.long),
         }
-

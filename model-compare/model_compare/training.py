@@ -10,7 +10,7 @@ import torch
 
 from .data import ImageSequenceDataset, load_frames
 from .evaluation import calibrate_scale_multiplier, evaluate, make_loader, to_device
-from .models import build_model, gaussian_nll
+from .models import build_model, gaussian_nll, vae_loss
 from .utils import resolve_device, save_json, set_seed, timestamped_run_dir
 
 
@@ -97,7 +97,13 @@ def train_model(config: dict, model_name: str, epochs_override: int = 0, max_sam
             out = model(data["images"])
             nll = gaussian_nll(out["loc"], out["scale"], data["target"])
             mse = torch.nn.functional.mse_loss(out["loc"], data["target"].view_as(out["loc"]))
-            loss = nll + float(config["loss"].get("mse_weight", 0.25)) * mse
+            gen = vae_loss(
+                out,
+                data["images"],
+                recon_weight=float(config["loss"].get("vae_recon_weight", 0.0)),
+                kl_weight=float(config["loss"].get("vae_kl_weight", 0.0)),
+            )
+            loss = nll + float(config["loss"].get("mse_weight", 0.25)) * mse + gen
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
@@ -164,4 +170,3 @@ def train_model(config: dict, model_name: str, epochs_override: int = 0, max_sam
         save_json(run_dir / f"metrics_{split}.json", metrics)
     logger.info("finished run_dir=%s", run_dir)
     return run_dir
-

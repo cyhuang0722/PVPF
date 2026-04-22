@@ -109,6 +109,98 @@ class ImageRegressorBaseline(nn.Module):
         return self.head(self.encoder(latest))
 
 
+class VaeFrameEncoder(nn.Module):
+    def __init__(self, in_channels: int, latent_dim: int) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 24, kernel_size=5, stride=2, padding=2),
+            nn.GELU(),
+            nn.Conv2d(24, 48, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(48),
+            nn.GELU(),
+            nn.Conv2d(48, 72, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(72),
+            nn.GELU(),
+            nn.Conv2d(72, 96, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(96),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
+        self.mu = nn.Linear(96, latent_dim)
+        self.logvar = nn.Linear(96, latent_dim)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.features(x)
+        return self.mu(h), self.logvar(h).clamp(-8.0, 4.0)
+
+
+class VaeFrameDecoder(nn.Module):
+    def __init__(self, out_channels: int, latent_dim: int, image_size: int = 96) -> None:
+        super().__init__()
+        if int(image_size) != 96:
+            raise ValueError("VaeFrameDecoder currently expects image_size=96")
+        self.proj = nn.Sequential(nn.Linear(latent_dim, 96 * 6 * 6), nn.GELU())
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(96, 72, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(72),
+            nn.GELU(),
+            nn.ConvTranspose2d(72, 48, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(48),
+            nn.GELU(),
+            nn.ConvTranspose2d(48, 24, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(24),
+            nn.GELU(),
+            nn.ConvTranspose2d(24, out_channels, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        h = self.proj(z).view(z.shape[0], 96, 6, 6)
+        return self.net(h)
+
+
+class VaeRegressorBaseline(nn.Module):
+    def __init__(
+        self,
+        in_channels: int = 3,
+        latent_dim: int = 48,
+        temporal_hidden_dim: int = 64,
+        dropout: float = 0.25,
+        image_size: int = 96,
+    ) -> None:
+        super().__init__()
+        self.encoder = VaeFrameEncoder(in_channels, latent_dim)
+        self.decoder = VaeFrameDecoder(in_channels, latent_dim, image_size=image_size)
+        self.temporal = nn.GRU(latent_dim, temporal_hidden_dim, batch_first=True)
+        self.head = RegressionHead(temporal_hidden_dim, dropout)
+
+    @staticmethod
+    def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        if not torch.is_grad_enabled():
+            return mu
+        std = torch.exp(0.5 * logvar)
+        return mu + torch.randn_like(std) * std
+
+    def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
+        batch, steps, channels, height, width = images.shape
+        flat = images.reshape(batch * steps, channels, height, width)
+        mu, logvar = self.encoder(flat)
+        z = self.reparameterize(mu, logvar)
+        recon = self.decoder(z).view(batch, steps, channels, height, width)
+        z_seq = z.view(batch, steps, -1)
+        _, hidden = self.temporal(z_seq)
+        out = self.head(hidden[-1])
+        out.update(
+            {
+                "recon": recon,
+                "mu": mu.view(batch, steps, -1),
+                "logvar": logvar.view(batch, steps, -1),
+            }
+        )
+        return out
+
+
 class RegressionHead(nn.Module):
     def __init__(self, in_dim: int, dropout: float) -> None:
         super().__init__()
@@ -136,6 +228,8 @@ def build_model(model_name: str, cfg: dict) -> nn.Module:
         return CnnGruBaseline(**cfg.get("cnn_gru", {}))
     if name == "image_regressor":
         return ImageRegressorBaseline(**cfg.get("image_regressor", {}))
+    if name == "vae_regressor":
+        return VaeRegressorBaseline(**cfg.get("vae_regressor", {}))
     raise ValueError(f"unknown model: {model_name}")
 
 
@@ -144,3 +238,12 @@ def gaussian_nll(loc: torch.Tensor, scale: torch.Tensor, target: torch.Tensor) -
     dist = torch.distributions.Normal(loc=loc, scale=scale.clamp_min(1e-4))
     return -dist.log_prob(target).mean()
 
+
+def vae_loss(out: dict[str, torch.Tensor], images: torch.Tensor, recon_weight: float, kl_weight: float) -> torch.Tensor:
+    if "recon" not in out:
+        return images.new_tensor(0.0)
+    recon = F.mse_loss(out["recon"], images)
+    mu = out["mu"]
+    logvar = out["logvar"]
+    kl = -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
+    return float(recon_weight) * recon + float(kl_weight) * kl

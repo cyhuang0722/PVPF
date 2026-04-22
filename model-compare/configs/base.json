@@ -1,0 +1,58 @@
+{
+  "seed": 42,
+  "device": "auto",
+  "paths": {
+    "workspace_root": "/Users/huangchouyue/Projects/PVPF",
+    "project_root": "/Users/huangchouyue/Projects/PVPF/model-compare"
+  },
+  "data": {
+    "samples_csv": "${workspace_root}/cloud-prob/artifacts/dataset/samples.csv",
+    "sky_mask_path": "${workspace_root}/data/sky_mask.png",
+    "image_size": 96,
+    "max_steps": 8,
+    "use_sky_mask": true
+  },
+  "model": {
+    "convlstm": {
+      "in_channels": 3,
+      "hidden_channels": 48,
+      "dropout": 0.25
+    },
+    "cnn_gru": {
+      "in_channels": 3,
+      "embed_dim": 96,
+      "hidden_dim": 96,
+      "dropout": 0.25
+    },
+    "image_regressor": {
+      "in_channels": 3,
+      "embed_dim": 128,
+      "dropout": 0.25
+    },
+    "vae_regressor": {
+      "in_channels": 3,
+      "latent_dim": 48,
+      "temporal_hidden_dim": 64,
+      "dropout": 0.25,
+      "image_size": 96
+    }
+  },
+  "loss": {
+    "mse_weight": 0.25,
+    "vae_recon_weight": 0.50,
+    "vae_kl_weight": 0.0005
+  },
+  "train": {
+    "artifact_root": "${project_root}/artifacts",
+    "batch_size": 16,
+    "epochs": 35,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0005,
+    "early_stopping_patience": 7,
+    "early_stopping_min_epochs": 8,
+    "target_interval_coverage": 0.80,
+    "calibration_steps": 8,
+    "num_workers": 0,
+    "log_every_batches": 10
+  }
+}
