@@ -19,7 +19,16 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=ROOT / "configs/base.json")
     parser.add_argument(
         "--model",
-        choices=["convlstm", "cnn_gru", "image_regressor", "vae_regressor"],
+        choices=[
+            "convlstm",
+            "cnn_gru",
+            "image_regressor",
+            "vae_regressor",
+            "convlstm_pv",
+            "cnn_gru_pv",
+            "image_regressor_pv",
+            "vae_regressor_pv",
+        ],
         required=True,
         help="Baseline to train.",
     )

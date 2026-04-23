@@ -134,7 +134,16 @@ def main() -> None:
 
     runs = list(args.run)
     if not runs:
-        for name in ["convlstm", "cnn_gru", "image_regressor", "vae_regressor"]:
+        for name in [
+            "convlstm",
+            "cnn_gru",
+            "image_regressor",
+            "vae_regressor",
+            "convlstm_pv",
+            "cnn_gru_pv",
+            "image_regressor_pv",
+            "vae_regressor_pv",
+        ]:
             runs.append(f"{name}={find_latest_run(args.artifact_root / name)}")
     out_dir = args.out_dir or (args.artifact_root / "comparison")
     out_dir.mkdir(parents=True, exist_ok=True)

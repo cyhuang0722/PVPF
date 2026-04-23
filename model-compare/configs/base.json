@@ -35,6 +35,37 @@
       "temporal_hidden_dim": 64,
       "dropout": 0.25,
       "image_size": 96
+    },
+    "convlstm_pv": {
+      "in_channels": 3,
+      "hidden_channels": 48,
+      "history_dim": 11,
+      "history_embed_dim": 48,
+      "dropout": 0.25
+    },
+    "cnn_gru_pv": {
+      "in_channels": 3,
+      "embed_dim": 96,
+      "hidden_dim": 96,
+      "history_dim": 11,
+      "history_embed_dim": 48,
+      "dropout": 0.25
+    },
+    "image_regressor_pv": {
+      "in_channels": 3,
+      "embed_dim": 128,
+      "history_dim": 11,
+      "history_embed_dim": 48,
+      "dropout": 0.25
+    },
+    "vae_regressor_pv": {
+      "in_channels": 3,
+      "latent_dim": 48,
+      "temporal_hidden_dim": 64,
+      "history_dim": 11,
+      "history_embed_dim": 48,
+      "dropout": 0.25,
+      "image_size": 96
     }
   },
   "loss": {

@@ -45,7 +45,7 @@ def evaluate(model: torch.nn.Module, dataset: ImageSequenceDataset, device: torc
     with torch.no_grad():
         for batch in loader:
             data = to_device(batch, device)
-            out = model(data["images"])
+            out = model(data["images"], data.get("history_x"))
             locs.append(out["loc"].cpu().numpy().reshape(-1))
             scales.append(out["scale"].cpu().numpy().reshape(-1))
             indices.append(data["index"].cpu().numpy())
@@ -93,4 +93,3 @@ def calibrate_scale_multiplier(model: torch.nn.Module, dataset: ImageSequenceDat
         else:
             low = mid
     return float(best)
-

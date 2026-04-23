@@ -11,9 +11,13 @@ seminar model. The baselines use the same `samples.csv` split and produce aligne
 - `image_regressor`: latest masked RGB image only -> CNN -> Gaussian CSI regression.
 - `vae_regressor`: 8 uniformly sampled masked RGB frames -> VAE latent sequence -> GRU -> Gaussian CSI regression,
   with reconstruction and KL regularization.
+- `convlstm_pv`, `cnn_gru_pv`, `image_regressor_pv`, `vae_regressor_pv`: the same visual backbones plus
+  recent PV/CSI history and `baseline_csi`.
 
-These baselines intentionally do not use the hand-crafted sun/path/weather features from
-`cloud-prob`. Weather labels are only used for reporting grouped metrics.
+The original four baselines intentionally do not use the hand-crafted sun/path/weather features from
+`cloud-prob`. The `_pv` variants add only recent PV/CSI history and `baseline_csi`; they still do not
+use solar geometry, sun-centered patch channels, or weather labels as model inputs. Weather labels are
+only used for reporting grouped metrics.
 
 `data.max_steps` defaults to `8`, so sequence models uniformly sample 8 frames from each interval
 instead of using every available image. This keeps ConvLSTM/VAE runs manageable while preserving
@@ -38,6 +42,10 @@ conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model con
 conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model cnn_gru
 conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model image_regressor
 conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model vae_regressor
+conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model convlstm_pv
+conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model cnn_gru_pv
+conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model image_regressor_pv
+conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model vae_regressor_pv
 ```
 
 Local smoke test:
@@ -49,7 +57,7 @@ conda run --no-capture-output -n torch_h5 python -u scripts/train.py --model cnn
 
 ## Compare Runs
 
-After all three models finish:
+After all models finish:
 
 ```bash
 conda run --no-capture-output -n torch_h5 python -u scripts/compare_runs.py

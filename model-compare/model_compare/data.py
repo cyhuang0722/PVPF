@@ -11,6 +11,19 @@ from torch.utils.data import Dataset
 
 WEATHER_TO_INDEX = {"clear_sky": 0, "cloudy": 1, "overcast": 2}
 INDEX_TO_WEATHER = {value: key for key, value in WEATHER_TO_INDEX.items()}
+HISTORY_COLUMNS = [
+    "past_pv_0_norm",
+    "past_pv_1_norm",
+    "past_pv_2_norm",
+    "past_pv_3_norm",
+    "past_pv_mean_norm",
+    "past_pv_std_norm",
+    "past_csi_last",
+    "past_csi_mean",
+    "past_csi_std",
+    "past_csi_trend",
+    "baseline_csi",
+]
 
 
 def parse_json_list(value: object) -> list[str]:
@@ -77,6 +90,9 @@ class ImageSequenceDataset(Dataset):
         self.clear_sky_w = self.df["target_clear_sky_w"].to_numpy(dtype=np.float32)[:, None]
         self.baseline_pv_w = self.df["baseline_pv_w"].to_numpy(dtype=np.float32)[:, None]
         self.weather_idx = self.df["weather_idx"].to_numpy(dtype=np.int64)
+        history = self.df.reindex(columns=HISTORY_COLUMNS).to_numpy(dtype=np.float32)
+        history = np.nan_to_num(history, nan=0.0, posinf=0.0, neginf=0.0)
+        self.history_x = history.astype(np.float32)
 
     def __len__(self) -> int:
         return len(self.df)
@@ -99,6 +115,7 @@ class ImageSequenceDataset(Dataset):
             "clear_sky_w": torch.from_numpy(self.clear_sky_w[index]),
             "target_pv_w": torch.from_numpy(self.target_pv_w[index]),
             "baseline_pv_w": torch.from_numpy(self.baseline_pv_w[index]),
+            "history_x": torch.from_numpy(self.history_x[index]),
             "weather_idx": torch.tensor(self.weather_idx[index], dtype=torch.long),
             "index": torch.tensor(index, dtype=torch.long),
         }

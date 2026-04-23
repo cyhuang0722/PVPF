@@ -32,7 +32,7 @@ def setup_logger(run_dir: Path, artifact_root: str | Path, model_name: str) -> l
 def build_datasets(config: dict, model_name: str, max_samples: int = 0) -> dict[str, ImageSequenceDataset]:
     frames = load_frames(config["data"]["samples_csv"], max_samples=max_samples)
     data_cfg = config["data"]
-    sequence_mode = "latest" if model_name == "image_regressor" else "sequence"
+    sequence_mode = "latest" if model_name in {"image_regressor", "image_regressor_pv"} else "sequence"
     return {
         split: ImageSequenceDataset(
             frame,
@@ -94,7 +94,7 @@ def train_model(config: dict, model_name: str, epochs_override: int = 0, max_sam
         for batch_idx, batch in enumerate(train_loader, start=1):
             data = to_device(batch, device)
             optimizer.zero_grad()
-            out = model(data["images"])
+            out = model(data["images"], data.get("history_x"))
             nll = gaussian_nll(out["loc"], out["scale"], data["target"])
             mse = torch.nn.functional.mse_loss(out["loc"], data["target"].view_as(out["loc"]))
             gen = vae_loss(
